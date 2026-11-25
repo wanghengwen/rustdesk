@@ -458,6 +458,12 @@ class RustdeskImpl {
         () => js.context.callMethod('setByName', ['custom-fps', fps]));
   }
 
+  // npf's Android app only (oudesk_module)
+  Future<void> sessionNpfBackground(
+      {required UuidValue sessionId, required bool background, dynamic hint}) {
+    return Future.value();
+  }
+
   Future<void> sessionLockScreen({required UuidValue sessionId, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', ['lock_screen']));
   }
@@ -1472,6 +1478,28 @@ class RustdeskImpl {
   Future<void> cmLoginRes(
       {required int connId, required bool res, dynamic hint}) {
     throw UnimplementedError("cmLoginRes");
+  }
+
+  Future<void> cmNpfAllow(
+      {required int connId, required String allowed, dynamic hint}) {
+    throw UnimplementedError("cmNpfAllow");
+  }
+
+  String mainNpfState({dynamic hint}) {
+    throw UnimplementedError("mainNpfState");
+  }
+
+  Future<void> mainNpfAssistRenew({dynamic hint}) {
+    throw UnimplementedError("mainNpfAssistRenew");
+  }
+
+  Future<String> mainNpfCall(
+      {required String path, required String body, dynamic hint}) {
+    throw UnimplementedError("mainNpfCall");
+  }
+
+  Future<void> mainNpfDisconnect({required int id, dynamic hint}) {
+    throw UnimplementedError("mainNpfDisconnect");
   }
 
   Future<void> cmCloseConnectionWindow({required int connId, dynamic hint}) {

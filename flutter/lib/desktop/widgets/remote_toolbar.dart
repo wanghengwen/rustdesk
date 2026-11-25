@@ -25,6 +25,9 @@ import './popup_menu.dart';
 import './kb_layout_type_chooser.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
+import 'package:flutter_hbb/npf/npf_glue.dart';
+
+part 'remote_toolbar_npf.dart';
 
 enum _ToolbarEdge { top, right, bottom, left }
 
@@ -465,6 +468,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   final _fraction = 0.5.obs;
   final _edge = _ToolbarEdge.top.obs;
   final _dragging = false.obs;
+  final _npfPanel = Rxn<NpfDeskCat>();
   // Live drag preview: where the toolbar would dock if the user dropped now.
   final _previewEdge = Rxn<_ToolbarEdge>();
   final _previewFraction = Rxn<double>();
@@ -670,6 +674,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   _debouncerHideProc(int v) {
+    if (kNpfUi) return; // npf's bar stays until it is collapsed
     if (!pin && collapse.isFalse && _isCursorOverImage && _dragging.isFalse) {
       collapse.value = true;
     }
@@ -734,7 +739,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
               return _buildDragPreview(context, pe, pf, _toolbarSize.value);
             }),
           ),
+          if (kNpfUi) ..._npfUnder(),
           toolbar,
+          if (kNpfUi) ..._npfOver(context, edge),
         ],
       );
     });
@@ -764,6 +771,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   Widget _buildDraggableCollapse(
       BuildContext context, _ToolbarEdge edge, bool isHorizontal) {
+    if (kNpfUi) return _npfBuildHandle(context, edge, isHorizontal);
     return Obx(() {
       if (collapse.isFalse && _dragging.isFalse) {
         triggerAutoHide();
@@ -802,6 +810,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   Widget _buildToolbar(
       BuildContext context, _ToolbarEdge edge, bool isHorizontal) {
+    if (kNpfUi) return _npfBuildToolbar(context, edge, isHorizontal);
     final List<Widget> toolbarItems = [];
     toolbarItems.add(_PinMenu(state: widget.state));
     toolbarItems.add(Obx(() {
@@ -851,6 +860,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       toolbarItems.add(_VoiceCallMenu(id: widget.id, ffi: widget.ffi));
     }
     if (!isWeb) toolbarItems.add(_RecordMenu());
+    if (kNpfUi && isHorizontal) toolbarItems.add(npfQualityItem(widget.ffi));
     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
     final toolbarBorderRadius = BorderRadius.all(Radius.circular(4.0));
     // innerAxis: how the toolbar icons themselves flow.
@@ -3325,6 +3335,8 @@ class _DraggableShowHide extends StatefulWidget {
 
   final Function(bool) setFullscreen;
   final Function() setMinimize;
+  // npf: only the grip to drag by; the buttons are on npf's own bar
+  final bool gripOnly;
 
   const _DraggableShowHide({
     Key? key,
@@ -3345,6 +3357,7 @@ class _DraggableShowHide extends StatefulWidget {
     required this.setFullscreen,
     required this.setMinimize,
     required this.borderRadius,
+    this.gripOnly = false,
   }) : super(key: key);
 
   @override
@@ -3556,6 +3569,7 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.gripOnly) return _buildDraggable(context);
     final ButtonStyle buttonStyle = ButtonStyle(
       minimumSize: MaterialStateProperty.all(const Size(0, 0)),
       padding: MaterialStateProperty.all(EdgeInsets.zero),

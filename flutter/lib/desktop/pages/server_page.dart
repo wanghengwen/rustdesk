@@ -21,6 +21,7 @@ import '../../common/widgets/chat_page.dart';
 import '../../models/file_model.dart';
 import '../../models/platform_model.dart';
 import '../../models/server_model.dart';
+import 'package:flutter_hbb/npf/npf_glue.dart';
 
 /// Set only by this window's own close control, and only once the user has confirmed. Any other
 /// way the window can go - a session logout closing every window, the window manager, a native
@@ -362,7 +363,7 @@ class ConnectionManagerState extends State<ConnectionManager>
 
 Widget buildConnectionCard(Client client) {
   return Consumer<ServerModel>(
-    builder: (context, value, child) => Column(
+    builder: (context, value, child) => npfConnectionCard(client) ?? Column(
       mainAxisAlignment: MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.start,
       key: ValueKey(client.id),

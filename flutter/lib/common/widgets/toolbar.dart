@@ -12,6 +12,7 @@ import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/shortcut_model.dart';
+import 'package:flutter_hbb/npf/npf_glue.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -611,8 +612,8 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
           onPressed: () => connectWithToken(isTcpTunneling: true)),
     );
   }
-  // note
-  if (isDefaultConn && !bind.isDisableAccount()) {
+  // note (ouLink: none, it is a RustDesk account's)
+  if (isDefaultConn && !bind.isDisableAccount() && !kNpfUi) {
     v.add(
       TTextMenu(
           child: Text(translate('Note')),
@@ -779,8 +780,8 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
       ));
     }
   }
-  // fingerprint
-  if (!(isDesktop || isWebDesktop)) {
+  // fingerprint (ouLink: none, npf authenticates the peer)
+  if (!(isDesktop || isWebDesktop) && !kNpfUi) {
     v.add(TTextMenu(
       child: Text(translate('Copy Fingerprint')),
       onPressed: () => onCopyFingerprint(FingerprintState.find(id).value),

@@ -178,14 +178,14 @@ elseif(VCPKG_TARGET_IS_OSX)
 --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox \
 ")
 elseif(VCPKG_TARGET_IS_IOS)
+    # decoding only, in VideoToolbox (hwcodec's); the minimum iOS and the SDK
+    # (the device's or the simulator's) the triplet's
     string(APPEND OPTIONS "\
 --arch=arm64 \
 --disable-autodetect \
---disable-hwaccels \
 --disable-encoders \
---disable-videotoolbox \
---extra-cflags=\"-arch arm64 -mios-version-min=8.0 -fembed-bitcode\" \
---extra-ldflags=\"-arch arm64 -mios-version-min=8.0 -fembed-bitcode\" \
+--enable-videotoolbox \
+--enable-hwaccel=h264_videotoolbox,hevc_videotoolbox \
 ")
 elseif(VCPKG_CMAKE_SYSTEM_NAME STREQUAL "Android")
     string(APPEND OPTIONS "\

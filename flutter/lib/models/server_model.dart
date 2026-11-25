@@ -126,6 +126,10 @@ class ServerModel with ChangeNotifier {
 
   TextEditingController get serverPasswd => _serverPasswd;
 
+  // npf: "CODE\tEXPIRES" of the share code shown (mobile), or ""
+  String _npfShare = '';
+  String get npfShare => _npfShare;
+
   List<Client> get clients => _clients;
 
   final controller = ScrollController();
@@ -178,6 +182,13 @@ class ServerModel with ChangeNotifier {
       }
 
       updatePasswordModel();
+      if (isAndroid) {
+        final share = await bind.mainGetCommon(key: 'npf-share');
+        if (share != _npfShare) {
+          _npfShare = share;
+          notifyListeners();
+        }
+      }
     }
 
     if (!isTest) {
@@ -828,6 +839,8 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
+  // npf: who it is and what it may use (see lib/npf/README.md), or null
+  Map<String, dynamic>? npf;
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -857,6 +870,7 @@ class Client {
     fromSwitch = json['from_switch'];
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
+    npf = json['npf'] is Map ? (json['npf'] as Map).cast<String, dynamic>() : null;
   }
 
   Map<String, dynamic> toJson() {
@@ -882,6 +896,7 @@ class Client {
     data['from_switch'] = fromSwitch;
     data['in_voice_call'] = inVoiceCall;
     data['incoming_voice_call'] = incomingVoiceCall;
+    if (npf != null) data['npf'] = npf;
     return data;
   }
 

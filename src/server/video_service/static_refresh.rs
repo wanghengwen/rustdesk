@@ -66,6 +66,8 @@ fn max_repeat_frames(codec: CodecFormat, quality: f32, backend: HardwareBackend)
 pub(super) struct FrameEncodeResult {
     pub(super) send_conn_ids: HashSet<i32>,
     pub(super) vpx_no_output: bool,
+    /// a key frame was sent
+    pub(super) key: bool,
 }
 
 pub(super) struct StaticRefresh<'a> {
@@ -187,7 +189,7 @@ impl<'a> StaticRefresh<'a> {
         ms: i64,
         encoder: &mut Encoder,
         frame_controller: &mut VideoFrameController,
-    ) -> ResultType<()> {
+    ) -> ResultType<bool> {
         let spf = spf.max(Duration::from_secs(1) / MAX_REPEAT_FPS);
         self.repeat_output_limit = self.repeat_output_limit.max(max_repeat_frames(
             self.codec_format,
@@ -219,7 +221,7 @@ impl<'a> StaticRefresh<'a> {
                 elapsed < interval
             }
         {
-            return Ok(());
+            return Ok(false);
         }
         let frame = if yuv.is_empty() {
             None
@@ -250,7 +252,7 @@ impl<'a> StaticRefresh<'a> {
             let mut vf = match result {
                 Ok(vf) if vf.union.is_none() => {
                     self.repeat_no_outputs += 1;
-                    return Ok(());
+                    return Ok(false);
                 }
                 Ok(vf) => vf,
                 Err(error) => {
@@ -270,12 +272,13 @@ impl<'a> StaticRefresh<'a> {
                             self.repeat_failures
                         );
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
             };
             self.repeat_output_counter += 1;
             self.repeat_failures = 0;
             vf.display = self.display_idx as _;
+            let key = crate::npf_net::is_key(&vf);
             let mut msg = Message::new();
             msg.set_video_frame(vf);
             self.recorder
@@ -286,8 +289,9 @@ impl<'a> StaticRefresh<'a> {
             let send_conn_ids = self.sp.send_video_frame(msg);
             frame_controller.set_send(now, send_conn_ids);
             // Static refinement must not count as motion for adaptive bitrate.
+            return Ok(key);
         }
-        Ok(())
+        Ok(false)
     }
 }
 

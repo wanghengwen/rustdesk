@@ -80,6 +80,12 @@ pub trait EncoderApi {
     fn is_hardware(&self) -> bool;
 
     fn disable(&self);
+
+    /// Makes the next frame a key frame. false: this encoder cannot (it is
+    /// started again instead).
+    fn request_keyframe(&mut self) -> bool {
+        false
+    }
 }
 
 pub struct Encoder {
@@ -668,7 +674,14 @@ impl Decoder {
                 }
                 #[cfg(feature = "hwcodec")]
                 if let Some(decoder) = &mut self.h264_ram {
-                    return Decoder::handle_hwram_video_frame(decoder, h264s, rgb, &mut self.i420);
+                    return Decoder::handle_hwram_video_frame(
+                        decoder,
+                        h264s,
+                        rgb,
+                        _texture,
+                        _pixelbuffer,
+                        &mut self.i420,
+                    );
                 }
                 Err(anyhow!("don't support h264!"))
             }
@@ -682,7 +695,14 @@ impl Decoder {
                 }
                 #[cfg(feature = "hwcodec")]
                 if let Some(decoder) = &mut self.h265_ram {
-                    return Decoder::handle_hwram_video_frame(decoder, h265s, rgb, &mut self.i420);
+                    return Decoder::handle_hwram_video_frame(
+                        decoder,
+                        h265s,
+                        rgb,
+                        _texture,
+                        _pixelbuffer,
+                        &mut self.i420,
+                    );
                 }
                 Err(anyhow!("don't support h265!"))
             }
@@ -768,11 +788,25 @@ impl Decoder {
         decoder: &mut HwRamDecoder,
         frames: &EncodedVideoFrames,
         rgb: &mut ImageRgb,
+        _texture: &mut ImageTexture,
+        _pixelbuffer: &mut bool,
         i420: &mut Vec<u8>,
     ) -> ResultType<bool> {
         let mut ret = false;
         for h264 in frames.frames.iter() {
             for image in decoder.decode(&h264.data)? {
+                // on the video surface already: its size only
+                #[cfg(target_os = "android")]
+                if let Some((w, h)) = image.on_surface() {
+                    *_texture = ImageTexture {
+                        texture: std::ptr::null_mut(),
+                        w,
+                        h,
+                    };
+                    *_pixelbuffer = false;
+                    ret = true;
+                    continue;
+                }
                 // TODO: just process the last frame
                 if image.to_fmt(rgb, i420).is_ok() {
                     ret = true;
@@ -825,7 +859,11 @@ impl Decoder {
         let codec = options
             .get("codec-preference")
             .map_or("".to_owned(), |c| c.to_owned());
-        let codec = if codec == "vp8" {
+        // ouLink's phones have no codec choice: always automatic, whatever an
+        // older version stored
+        let codec = if cfg!(any(target_os = "android", target_os = "ios")) {
+            PreferCodec::Auto
+        } else if codec == "vp8" {
             PreferCodec::VP8
         } else if codec == "vp9" {
             PreferCodec::VP9
@@ -851,13 +889,11 @@ impl Decoder {
 pub fn enable_hwcodec_option() -> bool {
     use base::config::keys::OPTION_ENABLE_HWCODEC;
 
-    if !cfg!(target_os = "ios") {
-        return option2bool(
-            OPTION_ENABLE_HWCODEC,
-            &Config::get_option(OPTION_ENABLE_HWCODEC),
-        );
-    }
-    false
+    // iOS too: its decoders (VideoToolbox, scrap's hwcodec feature)
+    option2bool(
+        OPTION_ENABLE_HWCODEC,
+        &Config::get_option(OPTION_ENABLE_HWCODEC),
+    )
 }
 #[cfg(feature = "vram")]
 pub fn enable_vram_option(encode: bool) -> bool {

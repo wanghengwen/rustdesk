@@ -104,7 +104,7 @@ pub fn core_main() -> Option<CoreMainAction> {
         #[cfg(target_os = "windows")]
         let should_check_start_tray = crate::platform::is_self_service_running()
             && crate::platform::is_cur_exe_the_installed();
-        if should_check_start_tray && !crate::check_process("--tray", true) {
+        if should_check_start_tray && !crate::npf_net::enabled() && !crate::check_process("--tray", true) {
             #[cfg(target_os = "linux")]
             hbb_common::allow_err!(crate::platform::check_autostart_config());
             hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
@@ -245,7 +245,8 @@ pub fn core_main() -> Option<CoreMainAction> {
                 if let Err(err) = platform::schedule_current_verified_update_file_cleanup() {
                     log::warn!("Failed to schedule verified update file cleanup: {}", err);
                 }
-                if config::is_disable_installation() {
+                // npf: the ouLink installer's (platform::update_me refuses)
+                if config::is_disable_installation() || crate::npf_net::enabled() {
                     return None;
                 }
 
@@ -282,7 +283,8 @@ pub fn core_main() -> Option<CoreMainAction> {
                 }
                 return None;
             } else if args[0] == "--silent-install" {
-                if config::is_disable_installation() {
+                // npf: the ouLink installer's (platform::install_me refuses)
+                if config::is_disable_installation() || crate::npf_net::enabled() {
                     return None;
                 }
                 let (printer_override, debug) = parse_silent_install_args(&args);
@@ -357,6 +359,19 @@ pub fn core_main() -> Option<CoreMainAction> {
             if args[0] == "--update" {
                 return finish_macos_update(crate::manual_update::execute_macos_update(&args));
             }
+            // the server's watch for a grant (macos::ask_permissions): a new
+            // process sees one made after the server started
+            if args[0] == "--screen-recording" {
+                std::process::exit(if crate::platform::macos::is_can_screen_recording(false) { 0 } else { 1 });
+            }
+            // the system's request, from a new process (macos::ask_permissions)
+            if args[0] == "--ask-permission" {
+                crate::platform::macos::request_permission(&args[1..]);
+                return None;
+            }
+            if args[0] == "--accessibility" {
+                std::process::exit(if crate::platform::macos::is_process_trusted(false) { 0 } else { 1 });
+            }
         }
         if args[0] == "--remove" {
             if args.len() == 2 {
@@ -366,7 +381,7 @@ pub fn core_main() -> Option<CoreMainAction> {
                 return None;
             }
         } else if args[0] == "--tray" {
-            if !crate::check_process("--tray", true) {
+            if !crate::npf_net::enabled() && !crate::check_process("--tray", true) {
                 crate::tray::start_tray();
             }
             return None;
@@ -392,7 +407,9 @@ pub fn core_main() -> Option<CoreMainAction> {
                     .arg(&format!("{} --tray", crate::get_app_name().to_lowercase()))
                     .status()
                     .ok();
-                hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+                if !crate::npf_net::enabled() {
+                    hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+                }
             }
             #[cfg(windows)]
             crate::privacy_mode::restore_reg_connectivity(true, false);

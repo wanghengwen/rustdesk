@@ -266,6 +266,7 @@ struct UserData {
     delay: UserDelay,
     record: bool,
     joined_at: Option<Instant>, // set by on_connection_open; the start-up guard's clock
+    npf_kbps: Option<u32>,      // what an npf session's congestion control lets the video send
 }
 
 impl UserData {
@@ -451,6 +452,30 @@ impl VideoQoS {
             user.quality = quality;
             // update ratio directly
             self.ratio = self.latest_quality().ratio();
+        }
+    }
+
+    /// An npf viewer's path carries this much video (from npf's target rate,
+    /// updated as it changes): the bitrate never goes above it.
+    pub fn user_npf_rate(&mut self, id: i32, kbps: u32) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.npf_kbps = Some(kbps);
+        }
+    }
+
+    // Under the lowest npf viewer's rate. Delay probes still drive the rest
+    // (they measure the path alone: on npf video does not queue ahead of them).
+    fn apply_npf_rate(&mut self) {
+        let Some(cap) = self.users.values().filter_map(|u| u.npf_kbps).min() else {
+            return;
+        };
+        let bitrate = self.bitrate();
+        if bitrate == 0 || !self.in_vbr_state() {
+            return;
+        }
+        let capped = self.ratio * cap as f32 / bitrate as f32;
+        if capped < self.ratio {
+            self.ratio = capped.max(BR_MIN_HIGH_RESOLUTION);
         }
     }
 
@@ -661,6 +686,7 @@ impl VideoQoS {
         } else {
             self.ratio = self.latest_quality().ratio();
         }
+        self.apply_npf_rate();
     }
 
     #[inline]

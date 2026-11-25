@@ -19,6 +19,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:xterm/xterm.dart';
 import '../../desktop/pages/terminal_connection_manager.dart';
 import '../../consts.dart';
+import '../../npf/npf_session.dart';
 
 const _terminalBackgroundOpacity = 0.7;
 
@@ -416,7 +417,7 @@ class _TerminalPageState extends State<TerminalPage>
     super.build(context);
     return WillPopScope(
       onWillPop: () async {
-        clientClose(sessionId, _ffi);
+        (npfLeaveSession ?? () => clientClose(sessionId, _ffi))();
         return false; // Prevent default back behavior
       },
       child: buildBody(),
@@ -510,7 +511,7 @@ class _TerminalPageState extends State<TerminalPage>
                     ..onEnd = (details) {
                       // Check if swipe started from left edge and moved right
                       if (_swipeStartX < edgeThreshold && (_swipeCurrentX - _swipeStartX) > swipeThreshold) {
-                        clientClose(sessionId, _ffi);
+                        (npfLeaveSession ?? () => clientClose(sessionId, _ffi))();
                       }
                       _swipeStartX = 0;
                       _swipeCurrentX = 0;
@@ -557,7 +558,7 @@ class _TerminalPageState extends State<TerminalPage>
               child: InkWell(
                 customBorder: const CircleBorder(),
                 onTap: () {
-                  clientClose(sessionId, _ffi);
+                  (npfLeaveSession ?? () => clientClose(sessionId, _ffi))();
                 },
                 child: Tooltip(
                   message: translate('Close'),

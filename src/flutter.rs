@@ -234,9 +234,28 @@ pub unsafe extern "C" fn get_rustdesk_app_name(buffer: *mut u16, length: i32) ->
     -1
 }
 
+/// Where a UI session's events go: Flutter's stream, or (npf's Android and
+/// iOS apps, which have no Flutter) a callback into their Kotlin (npf_jni) or
+/// Swift (npf_ios).
+pub enum UiStream {
+    Dart(StreamSink<EventToUI>),
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    Native(Box<dyn Fn(EventToUI) -> bool + Send + Sync>),
+}
+
+impl UiStream {
+    pub fn add(&self, event: EventToUI) -> bool {
+        match self {
+            UiStream::Dart(s) => s.add(event),
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            UiStream::Native(f) => f(event),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SessionHandler {
-    event_stream: Option<StreamSink<EventToUI>>,
+    event_stream: Option<UiStream>,
     // displays of current session.
     // We need this variable to check if the display is in use before pushing rgba to flutter.
     displays: Vec<usize>,
@@ -257,6 +276,10 @@ pub struct FlutterHandler {
     display_rgbas: Arc<RwLock<HashMap<usize, RgbaData>>>,
     peer_info: Arc<RwLock<PeerInfo>>,
     use_texture_render: Arc<AtomicBool>,
+    // Android: when Flutter was last told that frames of which display go to
+    // the video surface
+    #[cfg(target_os = "android")]
+    surface_told: Arc<std::sync::Mutex<Option<(std::time::Instant, usize)>>>,
 }
 
 impl Default for FlutterHandler {
@@ -268,6 +291,8 @@ impl Default for FlutterHandler {
             use_texture_render: Arc::new(
                 AtomicBool::new(crate::ui_interface::use_texture_render()),
             ),
+            #[cfg(target_os = "android")]
+            surface_told: Default::default(),
         }
     }
 }
@@ -879,7 +904,45 @@ impl InvokeUiSession for FlutterHandler {
     #[inline]
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn on_rgba(&self, display: usize, rgba: &mut scrap::ImageRgb) {
+        #[cfg(target_os = "android")]
+        {
+            if scrap::android::surface::render(rgba) {
+                self.on_surface_frame(display);
+                return;
+            }
+            *self.surface_told.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        // npf's iOS app: the frame straight to its Swift, when it takes frames
+        #[cfg(target_os = "ios")]
+        {
+            let sid = self.session_handlers.read().unwrap().keys().next().copied();
+            if sid.is_some_and(|sid| crate::npf_ios::frame(&sid, display, rgba)) {
+                return;
+            }
+        }
         self.on_rgba_soft_render(display, rgba);
+    }
+
+    // the frame is on the video surface: Flutter shows its Texture (told again
+    // once a second, for the waiting-for-image checks, and at once for another
+    // display)
+    #[cfg(target_os = "android")]
+    fn on_surface_frame(&self, display: usize) {
+        let mut told = self.surface_told.lock().unwrap_or_else(|e| e.into_inner());
+        if told
+            .is_some_and(|(t, d)| d == display && t.elapsed() < std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        *told = Some((std::time::Instant::now(), display));
+        drop(told);
+        self.push_event("surface_frame", &[("display", &display.to_string())], &[]);
+    }
+
+    #[cfg(target_os = "android")]
+    fn surface_key(&self) -> String {
+        let handlers = self.session_handlers.read().unwrap();
+        handlers.keys().next().map(|k| k.to_string()).unwrap_or_default()
     }
 
     #[inline]
@@ -1395,7 +1458,7 @@ pub fn session_add(
 pub fn session_start_(
     session_id: &SessionID,
     id: &str,
-    event_stream: StreamSink<EventToUI>,
+    event_stream: UiStream,
 ) -> ResultType<()> {
     // is_connected is used to indicate whether to start a peer connection. For two cases:
     // 1. "Move tab to new window"
@@ -1440,7 +1503,7 @@ pub fn session_start_(
 }
 
 #[inline]
-fn try_send_close_event(event_stream: &Option<StreamSink<EventToUI>>) {
+fn try_send_close_event(event_stream: &Option<UiStream>) {
     if let Some(stream) = &event_stream {
         stream.add(EventToUI::Event("close".to_owned()));
     }

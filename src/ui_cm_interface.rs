@@ -149,6 +149,8 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    // npf: who asked and what they may do (src/npf_net)
+    pub npf: Option<serde_json::Value>,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -235,6 +237,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         block_input: bool,
         privacy_mode: bool,
         from_switch: bool,
+        npf: Option<serde_json::Value>,
         #[cfg(not(any(target_os = "ios")))] tx: mpsc::UnboundedSender<Data>,
     ) {
         let client = Client {
@@ -261,6 +264,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
+            npf,
         };
         CLIENTS
             .write()
@@ -385,6 +389,19 @@ pub fn close(id: i32) {
 pub fn close_window(id: i32) {
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
         allow_err!(client.tx.send(Data::CmWindowClosed));
+    };
+}
+
+/// npf (src/npf_net): a connection's client
+pub fn client(id: i32) -> Option<Client> {
+    CLIENTS.read().unwrap().get(&id).cloned()
+}
+
+/// npf (src/npf_net): a message to the connection, past the CM's policy
+#[cfg(not(any(target_os = "ios")))]
+pub fn send(id: i32, data: Data) {
+    if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+        allow_err!(client.tx.send(data));
     };
 }
 
@@ -554,9 +571,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                         }
                         Ok(Some(data)) => {
                             match data {
-                                Data::Login{id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, file_transfer_enabled: _file_transfer_enabled, restart, recording, block_input, privacy_mode, from_switch} => {
+                                Data::Login{id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, file_transfer_enabled: _file_transfer_enabled, restart, recording, block_input, privacy_mode, from_switch, npf} => {
                                     log::debug!("conn_id: {}", id);
-                                    self.cm.add_connection(id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, restart, recording, block_input, privacy_mode, from_switch, self.tx.clone());
+                                    self.cm.add_connection(id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, restart, recording, block_input, privacy_mode, from_switch, npf, self.tx.clone());
                                     self.conn_id = id;
                                     #[cfg(target_os = "windows")]
                                     {
@@ -930,6 +947,7 @@ pub async fn start_listen<T: InvokeUiCM>(
                     block_input,
                     privacy_mode,
                     from_switch,
+                    None,
                     tx.clone(),
                 );
             }

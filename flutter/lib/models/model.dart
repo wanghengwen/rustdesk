@@ -393,6 +393,10 @@ class FfiModel with ChangeNotifier {
         parent.target?.serverModel.addConnection(evt);
       } else if (name == 'on_client_remove') {
         parent.target?.serverModel.onClientRemove(evt);
+      } else if (name == 'surface_frame') {
+        final display = int.tryParse(evt['display'] ?? '') ?? 0;
+        await parent.target?.onEvent2UIRgba();
+        await parent.target?.imageModel.onSurfaceFrame(display);
       } else if (name == 'update_quality_status') {
         parent.target?.qualityMonitorModel.updateQualityStatus(evt);
       } else if (name == 'update_block_input_state') {
@@ -1938,7 +1942,53 @@ class ImageModel with ChangeNotifier {
 
   addCallbackOnFirstImage(Function(String) cb) => callbacksOnFirstImage.add(cb);
 
-  clearImage() => _image = null;
+  clearImage() {
+    _image = null;
+    _surfaceSize = null;
+  }
+
+  // Android: frames shown on a Texture whose Surface Rust renders into
+  // (MainActivity "create_frame_surface"), not decoded into images
+  int _surfaceTexture = -1;
+  ui.Size? _surfaceSize; // set while the frames go to the surface
+
+  /// the Texture to show, or -1: show [image]
+  int get surfaceTexture => _surfaceSize != null ? _surfaceTexture : -1;
+  bool get hasImage => _image != null || _surfaceSize != null;
+  double get imageWidth => _image?.width.toDouble() ?? _surfaceSize?.width ?? 0;
+  double get imageHeight =>
+      _image?.height.toDouble() ?? _surfaceSize?.height ?? 0;
+
+  // one surface per session: its key, the session id
+  Future<void> createSurface() async {
+    if (!isAndroid || _surfaceTexture >= 0) return;
+    final id = await platformFFI.invokeMethod(
+        'create_frame_surface', sessionId.toString());
+    _surfaceTexture = id is int ? id : -1;
+  }
+
+  Future<void> releaseSurface() async {
+    if (_surfaceTexture < 0) return;
+    _surfaceTexture = -1;
+    _surfaceSize = null;
+    await platformFFI.invokeMethod(
+        'release_frame_surface', sessionId.toString());
+  }
+
+  // Rust: frames of [display] go to the surface (sent again once a second)
+  Future<void> onSurfaceFrame(int display) async {
+    final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
+    if (_surfaceTexture < 0 || rect == null) return;
+    final size = ui.Size(rect.width, rect.height);
+    if (size == _surfaceSize) return;
+    if (!hasImage && parent.target != null) {
+      await initializeCursorAndCanvas(parent.target!);
+    }
+    _surfaceSize = size;
+    _image?.dispose();
+    _image = null;
+    notifyListeners();
+  }
 
   bool _webDecodingRgba = false;
   final List<Uint8List> _webRgbaList = List.empty(growable: true);
@@ -1983,7 +2033,7 @@ class ImageModel with ChangeNotifier {
       rgba,
       rect?.width.toInt() ?? 0,
       rect?.height.toInt() ?? 0,
-      isWeb | isWindows | isLinux
+      isWeb | isWindows | isLinux | isAndroid
           ? ui.PixelFormat.rgba8888
           : ui.PixelFormat.bgra8888,
     );
@@ -1997,7 +2047,7 @@ class ImageModel with ChangeNotifier {
   Future<void> update(ui.Image? image,
       {bool Function()? isCurrentSession}) async {
     if (_disposeIfStale(image, isCurrentSession)) return;
-    if (_image == null && image != null) {
+    if (!hasImage && image != null) {
       if (isDesktop || isWebDesktop) {
         await parent.target?.canvasModel.updateViewStyle();
         await parent.target?.canvasModel.updateScrollStyle();
@@ -2010,6 +2060,7 @@ class ImageModel with ChangeNotifier {
     if (_disposeIfStale(image, isCurrentSession)) return;
     _image?.dispose();
     _image = image;
+    _surfaceSize = null;
     if (image != null) notifyListeners();
   }
 
@@ -2022,19 +2073,19 @@ class ImageModel with ChangeNotifier {
 
   // mobile only
   double get maxScale {
-    if (_image == null) return 1.5;
+    if (!hasImage) return 1.5;
     final size = parent.target!.canvasModel.getSize();
-    final xscale = size.width / _image!.width;
-    final yscale = size.height / _image!.height;
+    final xscale = size.width / imageWidth;
+    final yscale = size.height / imageHeight;
     return max(1.5, max(xscale, yscale));
   }
 
   // mobile only
   double get minScale {
-    if (_image == null) return 1.5;
+    if (!hasImage) return 1.5;
     final size = parent.target!.canvasModel.getSize();
-    final xscale = size.width / _image!.width;
-    final yscale = size.height / _image!.height;
+    final xscale = size.width / imageWidth;
+    final yscale = size.height / imageHeight;
     return min(xscale, yscale) / 1.5;
   }
 
@@ -2054,6 +2105,7 @@ class ImageModel with ChangeNotifier {
   void disposeImage() {
     _image?.dispose();
     _image = null;
+    _surfaceSize = null;
   }
 }
 
@@ -2735,7 +2787,7 @@ class CanvasModel with ChangeNotifier {
 
   // mobile only
   updateScale(double v, Offset focalPoint) {
-    if (parent.target?.imageModel.image == null) return;
+    if (parent.target?.imageModel.hasImage != true) return;
     final s = _scale;
     _scale *= v;
     final maxs = parent.target?.imageModel.maxScale ?? 1;
@@ -3366,7 +3418,7 @@ class CursorModel with ChangeNotifier {
     }
     double dx = delta.dx;
     double dy = delta.dy;
-    if (parent.target?.imageModel.image == null) return;
+    if (parent.target?.imageModel.hasImage != true) return;
     final scale = parent.target?.canvasModel.scale ?? 1.0;
     dx /= scale;
     dy /= scale;
@@ -4386,7 +4438,7 @@ class FFI {
       model.dispose();
     }
     _terminalModels.clear();
-    if (imageModel.image != null && !isWebDesktop) {
+    if (imageModel.hasImage && !isWebDesktop) {
       await setCanvasConfig(
           sessionId,
           cursorModel.x,

@@ -40,6 +40,45 @@ lazy_static::lazy_static! {
     static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));
 }
 
+/// npf (Android): the settings are files named after the program in the
+/// app's own directory, which stays (APP_DIR: no directory of the program's
+/// name as on a computer, where hbb_common copies it). The program was ouLink
+/// from 2026-11-09 up to npf 0.9.8 (ouLink is the whole product's name since;
+/// npf's docs/design/naming.md): the first start as ouDesk copies ouLink*.toml
+/// to its own names, before anything reads them, the main file last (it is
+/// what says "done"). The old files are left as they are; peers/ has no name
+/// in it.
+#[cfg(target_os = "android")]
+fn npf_adopt_old_settings(dir: &str) {
+    const OLD: &str = "ouLink";
+    let app = config::APP_NAME.read().unwrap().clone();
+    let dir = std::path::Path::new(dir);
+    if app == OLD || dir.join(format!("{app}.toml")).exists() || !dir.join(format!("{OLD}.toml")).is_file() {
+        return;
+    }
+    let copy = |rest: &str| -> std::io::Result<()> {
+        let (to, tmp) = (dir.join(format!("{app}{rest}")), dir.join(format!("{app}{rest}.adopt")));
+        if to.exists() {
+            return Ok(());
+        }
+        std::fs::copy(dir.join(format!("{OLD}{rest}")), &tmp)?;
+        std::fs::rename(&tmp, &to)
+    };
+    let adopt = || -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            match name.strip_prefix(OLD) {
+                Some(rest) if rest != ".toml" && rest.ends_with(".toml") && e.file_type()?.is_file() => copy(rest)?,
+                _ => {}
+            }
+        }
+        copy(".toml")
+    };
+    // (no logger yet: the result is seen in the files)
+    adopt().ok();
+}
+
 fn initialize(app_dir: &str, custom_client_config: &str) {
     flutter::async_tasks::start_flutter_async_runner();
     // `APP_DIR` is set in `main_get_data_dir_ios()` on iOS.
@@ -47,6 +86,8 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     {
         *config::APP_DIR.write().unwrap() = app_dir.to_owned();
     }
+    #[cfg(target_os = "android")]
+    npf_adopt_old_settings(app_dir);
     // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
     if custom_client_config.is_empty() {
         crate::load_custom_client();
@@ -195,7 +236,7 @@ pub fn session_start(
     session_id: SessionID,
     id: String,
 ) -> ResultType<()> {
-    session_start_(&session_id, &id, events2ui)
+    session_start_(&session_id, &id, flutter::UiStream::Dart(events2ui))
 }
 
 pub fn session_start_with_displays(
@@ -204,7 +245,7 @@ pub fn session_start_with_displays(
     id: String,
     displays: Vec<i32>,
 ) -> ResultType<()> {
-    session_start_(&session_id, &id, events2ui)?;
+    session_start_(&session_id, &id, flutter::UiStream::Dart(events2ui))?;
 
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.capture_displays(displays.clone(), vec![], vec![]);
@@ -581,6 +622,13 @@ pub fn session_set_custom_image_quality(session_id: SessionID, value: i32) {
 pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.set_custom_fps(fps);
+    }
+}
+
+/// npf: a session out of sight (true) or back (false), Session::npf_background
+pub fn session_npf_background(session_id: SessionID, background: bool) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.npf_background(background);
     }
 }
 
@@ -1863,6 +1911,13 @@ pub fn cm_get_clients_length() -> usize {
 }
 
 pub fn main_init(app_dir: String, custom_client_config: String) {
+    // a phone: once a process (npf's app: a Flutter engine per session)
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| initialize(&app_dir, &custom_client_config));
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     initialize(&app_dir, &custom_client_config);
     crate::keyboard::shortcuts::reload_from_config();
 }
@@ -2305,6 +2360,34 @@ pub fn cm_get_click_time() -> f64 {
 pub fn cm_switch_permission(conn_id: i32, name: String, enabled: bool) {
     #[cfg(not(any(target_os = "ios")))]
     crate::ui_cm_interface::switch_permission(conn_id, name, enabled)
+}
+
+/// npf: accept an npf connection with these of its `npf.can` (a JSON list;
+/// docs/npf-flutter-api.md)
+pub fn cm_npf_allow(conn_id: i32, allowed: String) {
+    let allowed = serde_json::from_str(&allowed).unwrap_or_default();
+    crate::npf_net::cm_allow(conn_id, allowed);
+}
+
+/// npf: this device, its peers, the assist code, the connections both ways
+/// (docs/npf-flutter-api.md); the global event `npf_state` says it changed
+pub fn main_npf_state() -> SyncReturn<String> {
+    SyncReturn(crate::npf_net::state())
+}
+
+pub fn main_npf_assist_renew() {
+    crate::npf_net::assist_renew();
+}
+
+/// npf: the sharing page's requests (`share/list`, `share/new`, ...): `{"ok":
+/// ANSWER}` or `{"error", "message"}` (docs/npf-flutter-api.md)
+pub fn main_npf_call(path: String, body: String) -> String {
+    crate::npf_net::call(path, body)
+}
+
+/// npf: end an incoming npf connection (`incoming[].id`)
+pub fn main_npf_disconnect(id: i32) {
+    crate::npf_net::disconnect(id);
 }
 
 pub fn cm_can_elevate() -> SyncReturn<bool> {
@@ -2799,6 +2882,12 @@ pub fn main_get_common(key: String) -> String {
             None => String::new(),
         };
         #[cfg(not(target_os = "linux"))]
+        return String::new();
+    } else if key == "npf-audio-outputs" {
+        // npf: the devices the session toolbar's speaker row lists
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios")))]
+        return serde_json::to_string(&crate::npf_audio_out::names()).unwrap_or_default();
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "ios"))]
         return String::new();
     } else if key == "permanent-password-set" {
         return ui_interface::is_permanent_password_set().to_string();

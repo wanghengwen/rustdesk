@@ -1,0 +1,51 @@
+ouDesk
+======
+
+ouDesk is a modified version of RustDesk (https://github.com/rustdesk/rustdesk),
+Copyright (C) Purslane Tech Pte. Ltd., licensed under the GNU Affero General
+Public License version 3 (see LICENCE). ouDesk is the remote desktop of ouLink.
+
+Modified by 浙江泺平信息技术有限公司 (Zhejiang Luoping Information Technology
+Co., Ltd.), 2026. The modified program is distributed under the same licence,
+AGPL-3.0. All upstream copyright and licence notices are kept.
+
+Main changes from RustDesk:
+
+- npf transport (src/npf_net, src/npf_desk.rs, src/npf_audio_out.rs): remote
+  desktop, file transfer, port forwards, RDP and terminals carried over npf's
+  sessions and channels through npf's applink interface, addressed by npf
+  device numbers (npf:NUMBER) and share codes; RustDesk's official
+  rendezvous/relay servers are never contacted.
+- Video over npf: key frames on request without an encoder restart, paced key
+  frames on slow paths, 1 frame a second while the window is out of sight.
+- Desktop UI (flutter/lib/npf, flutter/lib/desktop): home, sharing, approval
+  card, quality indicator and a session toolbar for npf sessions; main window
+  hidden, no tray.
+- File transfer: no pause; retry, drag between sides, transfers shown where
+  they go.
+- Android: the controlling pages as a Flutter add-to-app module
+  (flutter/oudesk_module) and a native (Kotlin) path through JNI
+  (src/npf_jni.rs); hardware decoding through MediaCodec into the video
+  surface; voice calls.
+- iOS: sessions driven from native Swift through a C ABI (src/npf_ios.rs);
+  VideoToolbox H.264/H.265 decoding.
+- macOS: permissions asked for when needed; launchd jobs installed by npf's
+  package.
+- Product name ouDesk: application, configuration, IPC, service and install
+  names, icons; translations for the new strings (src/lang).
+
+Bundled components (built from this repository, no other checkout needed):
+
+- libs/hbb_common: RustDesk's hbb_common (https://github.com/rustdesk/hbb_common)
+  with changes for ouDesk: whole messages over a program's transport
+  (src/msg_stream.rs), the ouDesk application name, no RustDesk rendezvous
+  server by default. Same licence as RustDesk.
+- libs/hwcodec: RustDesk's hwcodec (https://github.com/rustdesk-org/hwcodec)
+  with request_keyframe for the encoders, Android MediaCodec decoders and iOS
+  VideoToolbox decoders. Its SDK headers are the submodule
+  libs/hwcodec/externals (https://github.com/rustdesk-org/externals):
+  run `git submodule update --init` before building with the hwcodec feature.
+- libs/applink: npf's applink client in Rust, MIT licence (libs/applink/LICENSE).
+
+The source of a released ouDesk version is the tag oudesk-<version>
+(e.g. oudesk-0.9.25); the branch oudesk carries development builds.

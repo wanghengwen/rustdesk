@@ -1,0 +1,28 @@
+// Plugin fixes for AGP 8 (as flutter/android/build.gradle), applied from the
+// generated .android/build.gradle: apply from: "$rootDir/../plugins.gradle"
+def legacyPluginNamespaces = [
+    external_path: 'com.pinciat.external_path',
+    flutter_keyboard_visibility: 'com.jrai.flutter_keyboard_visibility',
+    qr_code_scanner: 'net.touchcapture.qr.flutterqr',
+    sqflite: 'com.tekartik.sqflite',
+    uni_links: 'name.avioli.unilinks',
+]
+def java8KotlinProjects = ['external_path', 'qr_code_scanner']
+
+subprojects {
+    def legacyNamespace = legacyPluginNamespaces[project.name]
+    if (legacyNamespace != null) {
+        project.plugins.withId('com.android.library') {
+            project.android.namespace = legacyNamespace
+        }
+    }
+    if (project.name in java8KotlinProjects) {
+        project.plugins.withId('kotlin-android') {
+            project.tasks.configureEach { task ->
+                if (task.hasProperty('kotlinOptions')) {
+                    task.kotlinOptions.jvmTarget = JavaVersion.VERSION_1_8.toString()
+                }
+            }
+        }
+    }
+}

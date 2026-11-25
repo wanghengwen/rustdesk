@@ -27,6 +27,8 @@ import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
+import 'package:flutter_hbb/npf/npf_glue.dart';
+import 'package:flutter_hbb/npf/npf_lang.dart';
 
 const double _kTabWidth = 200;
 const double _kTabHeight = 42;
@@ -1040,7 +1042,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 permissions(context),
                 password(context),
                 _Card(title: '2FA', children: [tfa()]),
-                if (!isChangeIdDisabled())
+                if (!kNpfUi && !isChangeIdDisabled())
                   _Card(title: 'ID', children: [changeId()]),
                 more(context),
               ]),
@@ -1830,7 +1832,7 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
   }
 
   Widget network(BuildContext context) {
-    final hideServer =
+    final hideServer = kNpfUi ||
         bind.mainGetBuildinOption(key: kOptionHideServerSetting) == 'Y';
     final hideProxy =
         isWeb || bind.mainGetBuildinOption(key: kOptionHideProxySetting) == 'Y';
@@ -2595,7 +2597,7 @@ class _AboutState extends State<_About> {
       final scrollController = ScrollController();
       return SingleChildScrollView(
         controller: scrollController,
-        child: _Card(title: translate('About RustDesk'), children: [
+        child: _Card(title: kNpfUi ? npfTr('About {name}', {'name': kNpfProductName}) : translate('About RustDesk'), children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2612,9 +2614,11 @@ class _AboutState extends State<_About> {
                 SelectionArea(
                     child: Text('${translate('Fingerprint')}: $fingerprint')
                         .marginSymmetric(vertical: 4.0)),
-              SelectionArea(
-                  child: Text('${translate('ID')}: $myId')
-                      .marginSymmetric(vertical: 4.0)),
+              if (!kNpfUi)
+                SelectionArea(
+                    child: Text('${translate('ID')}: $myId')
+                        .marginSymmetric(vertical: 4.0)),
+              if (!kNpfUi)
               InkWell(
                   onTap: () {
                     launchUrlString('https://rustdesk.com/privacy.html');
@@ -2623,6 +2627,7 @@ class _AboutState extends State<_About> {
                     translate('Privacy Statement'),
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
+              if (!kNpfUi)
               InkWell(
                   onTap: () {
                     launchUrlString('https://rustdesk.com');

@@ -46,6 +46,7 @@ import 'package:flutter_hbb/native/win32.dart'
 import 'package:flutter_hbb/native/common.dart'
     if (dart.library.html) 'package:flutter_hbb/web/common.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
+import 'package:flutter_hbb/npf/npf_glue.dart';
 
 final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
@@ -845,6 +846,11 @@ class OverlayDialogManager {
       _tagCount++;
     }
 
+    // npf: the soft keyboard closed first: the remote page's hidden input
+    // field and a dialog rebuilt every second (a countdown) took the focus
+    // by turns, the keyboard and the status bar came and went and the
+    // dialog jumped up and down
+    if (isAndroid) FocusManager.instance.primaryFocus?.unfocus();
     final dialog = Dialog<T>();
     _dialogs[dialogTag] = dialog;
 
@@ -1224,6 +1230,10 @@ void msgBox(SessionID sessionId, String type, String title, String text,
     );
     return;
   }
+  if (npfMsgBox(sessionId, type, title, text, dialogManager,
+      reconnect: reconnect)) {
+    return;
+  }
 
   List<Widget> buttons = [];
   bool hasOk = false;
@@ -1249,6 +1259,12 @@ void msgBox(SessionID sessionId, String type, String title, String text,
     }
   }
 
+  final hasReconnect = reconnect != null &&
+      title == "Connection Error" &&
+      reconnectTimeout != null;
+  // npf: a session that ended (closed by the peer, no reconnect offered)
+  // does not wait for OK, the page closes after 30 s
+  if (title == "Connection Error" && !hasReconnect) submitTimeout ??= 30;
   if (type != "connecting" && type != "success" && !type.contains("nook")) {
     hasOk = true;
     late final Widget btn;
@@ -1278,19 +1294,17 @@ void msgBox(SessionID sessionId, String type, String title, String text,
           dialogManager.dismissAll();
         }));
   }
-  if (reconnect != null &&
-      title == "Connection Error" &&
-      reconnectTimeout != null) {
+  if (hasReconnect) {
     // `enabled` is used to disable the dialog button once the button is clicked.
     final enabled = true.obs;
     final button = Obx(() => _CountDownButton(
           text: 'Reconnect',
-          second: reconnectTimeout,
+          second: reconnectTimeout!,
           onPressed: enabled.isTrue
               ? () {
                   // Disable the button
                   enabled.value = false;
-                  reconnect(dialogManager, sessionId, false);
+                  reconnect!(dialogManager, sessionId, false);
                 }
               : null,
         ));
@@ -2277,7 +2291,10 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
   }
 
   if (args.isEmpty) {
-    windowOnTop(null);
+    // npf: no main window to show (it stays hidden): an open session's
+    final sessions =
+        rustDeskWinManager.getActiveWindows().where((id) => id != kWindowMainId);
+    if (sessions.isNotEmpty) windowOnTop(sessions.first);
     return true;
   }
 
@@ -2624,6 +2641,12 @@ connect(BuildContext context, String id,
     } catch (_) {}
   }
   id = id.replaceAll(' ', '');
+  // an npf share code: one spelling (the recent entry, the peer's settings)
+  if (RegExp(r'^(npf:)?([2-9A-HJKMNP-Z]{4}-){2}[2-9A-HJKMNP-Z]{4}$',
+          caseSensitive: false)
+      .hasMatch(id)) {
+    id = id.toUpperCase().replaceFirst('NPF:', '');
+  }
   final oldId = id;
   id = await bind.mainHandleRelayId(id: id);
   forceRelay = id != oldId || forceRelay;
@@ -2869,7 +2892,12 @@ bool isRunningInPortableMode() {
 Future<void> onActiveWindowChanged() async {
   print(
       "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
-  if (rustDeskWinManager.getActiveWindows().isEmpty) {
+  // npf: the portable ouDesk's window process is also its service (it is
+  // attached to npf): it stays, hidden, after the last session. So does
+  // macOS's without the launchd agent that otherwise runs the service.
+  if (rustDeskWinManager.getActiveWindows().isEmpty &&
+      !(isWindows && !bind.mainIsInstalled()) &&
+      !(isMacOS && !bind.mainIsInstalledDaemon(prompt: false))) {
     // close all sub windows
     try {
       if (isLinux) {

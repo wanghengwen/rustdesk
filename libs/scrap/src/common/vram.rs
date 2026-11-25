@@ -186,6 +186,15 @@ impl EncoderApi for VRamEncoder {
         true
     }
 
+    // ffmpeg's nvenc and qsv make the next frame an IDR frame; amf cannot
+    fn request_keyframe(&mut self) -> bool {
+        if self.ctx.f.vendor == Driver::AMF {
+            return false;
+        }
+        self.encoder.request_keyframe();
+        true
+    }
+
     fn latency_free(&self) -> bool {
         true
     }

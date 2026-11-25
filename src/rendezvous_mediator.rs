@@ -301,6 +301,8 @@ impl RendezvousMediator {
         tokio::spawn(async move {
             direct_server(server_cloned).await;
         });
+        // npf: this machine's resource `desktop`, and the UI's requests
+        tokio::spawn(crate::npf_net::start(server.clone()));
         #[cfg(target_os = "android")]
         let start_lan_listening = true;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]

@@ -176,8 +176,10 @@ class FileModel {
     // and we should distinguish them.
     final resp = overrideConfirm ??
         (!skip
-            ? await showFileConfirmDialog(translate("Overwrite"),
-                "${evt['read_path']}", true, evt['is_identical'] == "true")
+            ? isDesktop
+                ? await askConflict(evt)
+                : await showFileConfirmDialog(translate("Overwrite"),
+                    "${evt['read_path']}", true, evt['is_identical'] == "true")
             : null);
     if (!jobController.hasTransferConflictJob(id)) {
       debugPrint("Ignore override confirm result for inactive job: $evt");
@@ -214,6 +216,24 @@ class FileModel {
   }
 
   bool fileConfirmCheckboxRemember = false;
+
+  /// The file there already that a transfer asks about now (desktop: its
+  /// folder's side shows it, FileManagerView.conflictPrompt).
+  final conflict = Rxn<FileConflict>();
+
+  /// The answer as showFileConfirmDialog's: true overwrite, null skip, false
+  /// cancel the transfer.
+  Future<bool?> askConflict(Map<String, dynamic> evt) async {
+    final id = int.tryParse(evt['id']?.toString() ?? '') ?? 0;
+    fileConfirmCheckboxRemember = false;
+    final c = FileConflict(id, "${evt['read_path']}",
+        evt['is_upload'] == "true", evt['is_identical'] == "true");
+    conflict.value = c;
+    final resp = await c.answer.future;
+    fileConfirmCheckboxRemember = c.remember.value;
+    if (conflict.value == c) conflict.value = null;
+    return resp;
+  }
 
   Future<bool?> showFileConfirmDialog(
       String title, String content, bool showCheckbox, bool isIdentical) async {
@@ -306,6 +326,8 @@ class FileModel {
       final isWindows = otherSideData.options.isWindows;
       final showHidden = otherSideData.options.showHidden;
       final jobID = jobController.addTransferJob(entry, false);
+      jobController.jobTable[jobController.getJob(jobID)].to =
+          PathUtil.join(toPath, entry.name, isWindows);
       jobController.registerTransferConflictBatch([jobID],
           batchId: int.tryParse(obj['batchId']?.toString() ?? ''));
       webSendLocalFiles(
@@ -652,6 +674,9 @@ class FileController {
     final transferJobIds = <int>[];
     for (var from in items.items) {
       final jobID = jobController.addTransferJob(from, isRemoteToLocal);
+      jobController.jobTable[jobController.getJob(jobID)]
+        ..to = PathUtil.join(toPath, from.name, isWindows)
+        ..isDir = from.isDirectory;
       // Keep this check before PathUtil.join: Rust does not receive the selected
       // root separately, and Web transfers bypass Rust validation.
       if (isRemoteToLocal &&
@@ -1130,6 +1155,30 @@ class JobController {
       ..id = jobID
       ..isRemoteToLocal = isRemoteToLocal);
     return jobID;
+  }
+
+  /// A failed transfer sent again, from and to where it was.
+  void retryTransfer(JobProgress j, bool includeHidden) {
+    jobTable.removeWhere((x) => x.id == j.id);
+    final from = Entry()
+      ..path = j.jobName
+      ..name = j.fileName
+      ..size = j.totalSize
+      ..entryType = j.isDir ? 0 : 4;
+    final id = addTransferJob(from, j.isRemoteToLocal);
+    jobTable[getJob(id)]
+      ..to = j.to
+      ..isDir = j.isDir;
+    registerTransferConflictBatch([id]);
+    bind.sessionSendFiles(
+        sessionId: sessionId,
+        actId: id,
+        path: j.jobName,
+        to: j.to,
+        fileNum: 0,
+        includeHidden: includeHidden,
+        isRemote: j.isRemoteToLocal,
+        isDir: j.isDir);
   }
 
   int addDeleteFileJob(Entry file, bool isRemote) {
@@ -1852,6 +1901,7 @@ class JobProgress {
   var fileName = "";
   var remote = "";
   var to = "";
+  var isDir = false;
   var showHidden = false;
   var err = "";
   int lastTransferredSize = 0;
@@ -2255,4 +2305,15 @@ class FileDialogEventLoop
   void setSkip(bool skip) {
     _skip = skip;
   }
+}
+
+/// A file already where a transfer writes one: the user's answer awaited.
+class FileConflict {
+  final int id;
+  final String path;
+  final bool toRemote;
+  final bool identical;
+  final answer = Completer<bool?>();
+  final remember = false.obs;
+  FileConflict(this.id, this.path, this.toRemote, this.identical);
 }

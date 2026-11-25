@@ -507,6 +507,19 @@ impl<T: InvokeUiSession> Session<T> {
         }
     }
 
+    /// npf: the session out of sight (its page left running, the app in the
+    /// background): 1 frame a second; back in sight: the login's fps. The
+    /// peer's config is left as it is.
+    pub fn npf_background(&self, background: bool) {
+        let msg = {
+            let mut lc = self.lc.write().unwrap();
+            lc.npf_background = background;
+            let fps = if background { 1 } else { lc.custom_fps_option().unwrap_or(30) };
+            lc.set_custom_fps(fps, false)
+        };
+        self.send(Data::Message(msg));
+    }
+
     pub fn save_trackpad_speed(&self, trackpad_speed: i32) {
         self.lc.write().unwrap().save_trackpad_speed(trackpad_speed);
     }
@@ -1758,6 +1771,12 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn next_rgba(&self, display: usize);
     #[cfg(all(feature = "vram", feature = "flutter"))]
     fn on_texture(&self, display: usize, texture: *mut c_void);
+    // Android: a frame shown on the video surface (scrap::android::surface)
+    #[cfg(all(target_os = "android", feature = "flutter"))]
+    fn on_surface_frame(&self, display: usize);
+    // Android: the key of the session's video surface (its Flutter session id)
+    #[cfg(all(target_os = "android", feature = "flutter"))]
+    fn surface_key(&self) -> String;
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
     fn set_current_display(&self, disp_idx: i32);
     #[cfg(feature = "flutter")]

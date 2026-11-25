@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../common.dart';
 import '../generated_bridge.dart';
+import '../npf/npf_session.dart';
 
 final class RgbaFrame extends Struct {
   @Uint32()
@@ -156,6 +157,10 @@ class PlatformFFI {
       try {
         // SYSTEM user failed
         _dir = (await getApplicationDocumentsDirectory()).path;
+        if (isIOS && npfIosDirs) {
+          _dir = '${(await getApplicationSupportDirectory()).path}/oulink';
+          Directory(_dir).createSync(recursive: true);
+        }
       } catch (e) {
         debugPrint('Failed to get documents directory: $e');
       }
@@ -182,6 +187,10 @@ class PlatformFFI {
           // which provided the `downloads` path in the sandbox.
           // It is unclear why we now use the `data` directory in the sandbox instead.
           _homeDir = _ffiBind.mainGetDataDirIos(appDir: _dir);
+          if (npfIosDirs) {
+            _homeDir = '${(await getApplicationDocumentsDirectory()).path}/ouLink';
+            Directory(_homeDir).createSync(recursive: true);
+          }
         } else {
           // no need to set home dir
         }
@@ -309,15 +318,25 @@ class PlatformFFI {
     });
   }
 
+  // MissingPluginException: a host app without RustDesk's MainActivity
+  // (npf's app, oudesk_module) lacks the method
   invokeMethod(String method, [dynamic arguments]) async {
     if (!isAndroid) return Future<bool>(() => false);
-    return await _toAndroidChannel.invokeMethod(method, arguments);
+    try {
+      return await _toAndroidChannel.invokeMethod(method, arguments);
+    } on MissingPluginException {
+      return false;
+    }
   }
 
   Future<T?> invokeMethodWithResult<T>(String method,
       [dynamic arguments]) async {
     if (!isAndroid) return null;
-    return await _toAndroidChannel.invokeMethod<T>(method, arguments);
+    try {
+      return await _toAndroidChannel.invokeMethod<T>(method, arguments);
+    } on MissingPluginException {
+      return null;
+    }
   }
 
   void syncAndroidServiceAppDirConfigPath() {

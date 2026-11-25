@@ -8,6 +8,7 @@ import 'package:get/get.dart';
 import 'package:toggle_switch/toggle_switch.dart';
 
 import '../../common.dart';
+import '../../npf/npf_session.dart';
 import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
 import '../../utils/android_documents.dart';
@@ -307,6 +308,9 @@ class _FileManagerPageState extends State<FileManagerPage> {
         if (selectMode.value != SelectMode.none) {
           selectMode.value = SelectMode.none;
           setState(() {});
+        } else if (npfLeaveSession != null &&
+            currentFileController.history.isEmpty) {
+          npfLeaveSession!();
         } else {
           currentFileController.goBack();
         }

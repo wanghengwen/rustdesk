@@ -3,7 +3,7 @@ use hbb_common::{
     anyhow::{bail, Context, Result},
     log,
 };
-use magnum_opus::{Application::LowDelay, Channels, Encoder};
+use magnum_opus::{Channels, Encoder};
 use std::{
     collections::VecDeque,
     sync::{
@@ -269,7 +269,7 @@ pub(super) fn start_capture_encoder(
     service: GenericService,
 ) -> Result<(CapturePcmSender, CaptureEncoderWorker)> {
     let (sender, receiver) = new_pcm_handoff(CAPTURE_PCM_QUEUE_PACKETS, config.max_packet_samples)?;
-    let encoder = Encoder::new(config.sample_rate, config.encode_channel, LowDelay)?;
+    let encoder = Encoder::new(config.sample_rate, config.encode_channel, super::opus_application())?;
     let stop = Arc::new(AtomicBool::new(false));
     let context = CaptureEncoderContext {
         receiver,

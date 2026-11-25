@@ -13,13 +13,10 @@
           <string>LoginWindow</string>
           <string>Aqua</string>
         </array>
+        <!-- however it ends (macOS's "Quit & Reopen" after a Screen Recording
+             grant ends it as a clean exit): started again, as the daemon -->
         <key>KeepAlive</key>
-        <dict>
-            <key>SuccessfulExit</key>
-            <false />
-            <key>AfterInitialDemand</key>
-            <false />
-        </dict>
+        <true />
         <key>ThrottleInterval</key>
         <integer>1</integer>
         <key>RunAtLoad</key>

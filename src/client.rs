@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     check_port,
-    common::input::{MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
+    common::input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
     create_symmetric_key_msg, decode_id_pk, decode_id_pk_dtls, dtls_fingerprint_bound, get_rs_pk,
     is_keyboard_mode_supported,
     kcp_stream::KcpStream,
@@ -97,6 +97,8 @@ mod login_method;
 
 #[cfg(not(target_os = "linux"))]
 mod audio_playback;
+#[cfg(target_os = "android")]
+mod voice_playback;
 #[cfg(target_os = "windows")]
 mod audio_playback_recovery;
 #[cfg(all(test, not(target_os = "linux")))]
@@ -121,6 +123,7 @@ pub const REQUIRE_2FA: &'static str = "2FA Required";
 pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
 pub const LOGIN_MSG_OFFLINE: &str = "Offline";
 pub const LOGIN_SCREEN_WAYLAND: &str = "Wayland login screen is not supported";
+pub const LOGIN_MAC_NO_SCREEN_RECORDING: &str = "No Screen Recording permission";
 #[cfg(target_os = "linux")]
 pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "ubuntu-21-04-required";
 #[cfg(target_os = "linux")]
@@ -436,6 +439,11 @@ impl Client {
         if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {
             bail!("Incoming only mode");
         }
+        // an npf number or code: through npf (src/npf_net), not hbbs
+        if let Some(target) = crate::npf_net::parse_target(peer) {
+            let stream = crate::npf_net::connect(&target, conn_type as i32).await?;
+            return Ok(((stream, true, None, None, "npf"), (0, "".to_owned()), false));
+        }
         // to-do: remember the port for each peer, so that we can retry easier
         if hbb_common::is_ip_str(peer) {
             return Ok((
@@ -476,6 +484,10 @@ impl Client {
             crate::get_rendezvous_server(1_000).await
         } else {
             if other_server == PUBLIC_SERVER {
+                // npf: there may be no public server at all
+                if RENDEZVOUS_SERVERS.is_empty() {
+                    bail!("no public server");
+                }
                 (
                     check_port(RENDEZVOUS_SERVERS[0], RENDEZVOUS_PORT),
                     RENDEZVOUS_SERVERS[1..]
@@ -2158,6 +2170,15 @@ pub struct AudioHandler {
     playback_status: Arc<audio_playback::AudioPlaybackStatus>,
     #[cfg(target_os = "windows")]
     playback_recovery: audio_playback_recovery::PlaybackRecovery,
+    /// played as a voice call's (voice_playback)
+    #[cfg(target_os = "android")]
+    voice_out: bool,
+    /// Android closed the stream (voice_playback opens it again)
+    #[cfg(target_os = "android")]
+    stream_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// the peer's sample rate (npf_ios: a voice call's sound to Swift)
+    #[cfg(target_os = "ios")]
+    voice_rate: u32,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2376,11 +2397,19 @@ impl AudioHandler {
     /// Start the audio playback.
     #[cfg(not(target_os = "linux"))]
     fn start_audio(&mut self, format0: AudioFormat) -> ResultType<()> {
-        let device = AUDIO_HOST
-            .default_output_device()
-            .with_context(|| "Failed to get default output device")?;
+        #[cfg(target_os = "android")]
+        if let Some(r) = self.start_voice_audio(&format0) {
+            return r;
+        }
+        // npf: the device the toolbar's speaker row names, if any
+        let device = match crate::npf_audio_out::chosen(&AUDIO_HOST) {
+            Some(device) => device,
+            None => AUDIO_HOST
+                .default_output_device()
+                .with_context(|| "Failed to get default output device")?,
+        };
         log::info!(
-            "Using default output device: \"{}\"",
+            "Using output device: \"{}\"",
             device.name().unwrap_or("".to_owned())
         );
         let config = device.default_output_config().map_err(|e| anyhow!(e))?;
@@ -2430,7 +2459,13 @@ impl AudioHandler {
 
     /// Handle audio format and create an audio decoder.
     pub fn handle_format(&mut self, f: AudioFormat) {
+        #[cfg(target_os = "ios")]
+        let rate = f.sample_rate;
         self.handle_format_with_start(f, Self::start_audio);
+        #[cfg(target_os = "ios")]
+        {
+            self.voice_rate = rate;
+        }
     }
 
     fn handle_format_with_start(
@@ -2501,10 +2536,17 @@ impl AudioHandler {
     /// Handle audio frame and play it.
     #[inline]
     pub fn handle_frame(&mut self, frame: AudioFrame) {
+        #[cfg(target_os = "android")]
+        self.follow_voice_call();
+        // npf: a voice call's sound is Swift's, played with its echo canceller
+        #[cfg(target_os = "ios")]
+        let voice = crate::npf_ios::voice_playing();
+        #[cfg(not(any(target_os = "ios", target_os = "linux")))]
+        let voice = false;
         #[cfg(not(target_os = "linux"))]
         self.playback_status.report_errors();
         #[cfg(not(target_os = "linux"))]
-        if self.audio_stream.is_none()
+        if !voice && self.audio_stream.is_none()
             || !self
                 .playback_status
                 .ready
@@ -2518,8 +2560,21 @@ impl AudioHandler {
             return;
         }
         self.audio_decoder.as_mut().map(|(d, buffer)| {
-            let decoded_frames = match d.decode_float(&frame.data, buffer, false) {
-                Ok(decoded_frames) => decoded_frames,
+            // The frame before this one was lost (npf): Opus in-band FEC
+            // rebuilds it from this frame, played first. The lost frame is
+            // taken to be as long as this one.
+            let mut rebuilt = 0;
+            if frame.lost_before > 0 {
+                if let Ok(n) = d.get_nb_samples(&frame.data) {
+                    let len = n * self.channels as usize;
+                    if len < buffer.len() {
+                        rebuilt = d.decode_float(&frame.data, &mut buffer[..len], true).unwrap_or(0);
+                    }
+                }
+            }
+            let tail = &mut buffer[rebuilt * self.channels as usize..];
+            let decoded_frames = match d.decode_float(&frame.data, tail, false) {
+                Ok(decoded_frames) => rebuilt + decoded_frames,
                 Err(error) => {
                     log::warn!("Failed to decode audio frame: {error:?}");
                     return;
@@ -2527,6 +2582,11 @@ impl AudioHandler {
             };
             let channels = self.channels;
             let n = decoded_frames * channels as usize;
+            #[cfg(target_os = "ios")]
+            if voice {
+                crate::npf_ios::voice_out(&buffer[0..n], self.voice_rate, channels);
+                return;
+            }
             #[cfg(not(target_os = "linux"))]
             {
                 let config = DecodedAudioConfig {
@@ -2566,11 +2626,13 @@ impl AudioHandler {
         self.device_channel = config.channels;
         #[cfg(target_os = "windows")]
         let err_fn = self.playback_recovery.new_error_callback();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "android")))]
         let err_fn = move |err| {
             // too many errors, will improve later
             log::trace!("an error occurred on stream: {}", err);
         };
+        #[cfg(target_os = "android")]
+        let err_fn = voice_playback::on_stream_error(self.stream_lost.clone());
         self.audio_buffer
             .resize(config.sample_rate.0 as _, config.channels as _);
         let audio_buffer = self.audio_buffer.0.clone();
@@ -2666,7 +2728,9 @@ impl VideoHandler {
         let luid = Self::get_adapter_luid();
         log::info!("new video handler for display #{_display}, format: {format:?}, luid: {luid:?}");
         let rgba_format =
-            if cfg!(feature = "flutter") && (cfg!(windows) || cfg!(target_os = "linux")) {
+            if cfg!(feature = "flutter")
+                && (cfg!(windows) || cfg!(target_os = "linux") || cfg!(target_os = "android"))
+            {
                 ImageFormat::ABGR
             } else {
                 ImageFormat::ARGB
@@ -2875,6 +2939,8 @@ pub struct LoginConfigHandler {
     pub save_ab_password_to_recent: bool, // true: connected with ab password
     pub other_server: Option<(String, String, String)>,
     pub custom_fps: Arc<Mutex<Option<usize>>>,
+    // npf: out of sight at 1 frame a second (Session::npf_background)
+    pub npf_background: bool,
     pub adapter_luid: Option<i64>,
     pub mark_unsupported: Vec<CodecFormat>,
     pub selected_windows_session_id: Option<u32>,
@@ -3395,11 +3461,7 @@ impl LoginConfigHandler {
             };
             msg.custom_image_quality = quality << 8;
             #[cfg(feature = "flutter")]
-            if let Some(custom_fps) = self.options.get("custom-fps") {
-                let mut custom_fps = custom_fps.parse().unwrap_or(30);
-                if !allow_more && custom_fps > 30 {
-                    custom_fps = 30;
-                }
+            if let Some(custom_fps) = self.custom_fps_option() {
                 msg.custom_fps = custom_fps;
                 *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
             }
@@ -3591,6 +3653,14 @@ impl LoginConfigHandler {
     ///
     /// * `fps` - The given fps.
     /// * `save_config` - Save the config.
+    /// The fps the login asks for: the peer's "custom-fps" (at most 30 over a
+    /// public server, unless direct).
+    pub fn custom_fps_option(&self) -> Option<i32> {
+        let fps = self.options.get("custom-fps")?.parse().unwrap_or(30);
+        let allow_more = !crate::using_public_server() || self.direct == Some(true);
+        Some(if !allow_more && fps > 30 { 30 } else { fps })
+    }
+
     pub fn set_custom_fps(&mut self, fps: i32, save_config: bool) -> Message {
         let mut misc = Misc::new();
         misc.set_option(OptionMessage {
@@ -4010,6 +4080,9 @@ pub fn start_video_thread<F, T>(
         #[cfg(windows)]
         sync_cpu_usage();
         get_hwcodec_config();
+        // its frames go to its session's surface
+        #[cfg(all(target_os = "android", feature = "flutter"))]
+        scrap::android::surface::use_key(session.surface_key());
         let mut video_handler = None;
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
@@ -4147,6 +4220,8 @@ pub fn start_audio_thread() -> MediaSender {
     let (audio_sender, audio_receiver) = mpsc::channel::<MediaData>();
     std::thread::spawn(move || {
         let mut audio_handler = AudioHandler::default();
+        #[cfg(not(target_os = "linux"))]
+        let mut npf_out = crate::npf_audio_out::Watch::default();
         loop {
             #[cfg(target_os = "windows")]
             let received = audio_handler.receive_audio(&audio_receiver);
@@ -4155,10 +4230,17 @@ pub fn start_audio_thread() -> MediaSender {
             if let Ok(data) = received {
                 match data {
                     MediaData::AudioFrame(af) => {
+                        // npf: another speaker was chosen, open the output on it
+                        #[cfg(not(target_os = "linux"))]
+                        if let Some(f) = npf_out.changed() {
+                            audio_handler.handle_format(f);
+                        }
                         audio_handler.handle_frame(*af);
                     }
                     MediaData::AudioFormat(f) => {
                         log::debug!("recved audio format, sample rate={}", f.sample_rate);
+                        #[cfg(not(target_os = "linux"))]
+                        npf_out.opened(&f);
                         audio_handler.handle_format(f);
                     }
                     _ => {}
@@ -4386,23 +4468,27 @@ pub fn send_pointer_device_event(
 /// * `interface` - The interface for sending data.
 /// * `send_left_click` - Whether to send a click event.
 fn activate_os(interface: &impl Interface, send_left_click: bool) {
+    if !send_left_click {
+        // Only waking the screen (the first picture is late): a pointer nudge
+        // there and back. RustDesk's right click at the top left corner opened
+        // a menu (Windows) or hit the hot corner (macOS) on every slow start
+        // (2026-11-16).
+        let rel = crate::input::MOUSE_TYPE_MOVE_RELATIVE;
+        send_mouse(rel, 1, 1, false, false, false, false, interface);
+        std::thread::sleep(Duration::from_millis(50));
+        send_mouse(rel, -1, -1, false, false, false, false, interface);
+        return;
+    }
     let left_down = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_DOWN;
     let left_up = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_UP;
-    let right_down = MOUSE_BUTTON_RIGHT << 3 | MOUSE_TYPE_DOWN;
-    let right_up = MOUSE_BUTTON_RIGHT << 3 | MOUSE_TYPE_UP;
     send_mouse(left_up, 0, 0, false, false, false, false, interface);
     std::thread::sleep(Duration::from_millis(50));
     send_mouse(0, 0, 0, false, false, false, false, interface);
     std::thread::sleep(Duration::from_millis(50));
     send_mouse(0, 3, 3, false, false, false, false, interface);
-    let (click_down, click_up) = if send_left_click {
-        (left_down, left_up)
-    } else {
-        (right_down, right_up)
-    };
     std::thread::sleep(Duration::from_millis(50));
-    send_mouse(click_down, 0, 0, false, false, false, false, interface);
-    send_mouse(click_up, 0, 0, false, false, false, false, interface);
+    send_mouse(left_down, 0, 0, false, false, false, false, interface);
+    send_mouse(left_up, 0, 0, false, false, false, false, interface);
     /*
     let mut key_event = KeyEvent::new();
     // do not use Esc, which has problem with Linux
@@ -4498,6 +4584,12 @@ lazy_static::lazy_static! {
             title: "Login Error",
             text: "Login screen using Wayland is not supported",
             link: "https://rustdesk.com/docs/en/manual/linux/#login-screen",
+            try_again: true,
+        }), (LOGIN_MAC_NO_SCREEN_RECORDING, LoginErrorMsgBox{
+            msgtype: "error",
+            title: "Login Error",
+            text: "oudesk-mac-no-screen-recording-tip",
+            link: "",
             try_again: true,
         }), (LOGIN_MSG_NO_PASSWORD_ACCESS, LoginErrorMsgBox{
             msgtype: "wait-remote-accept-nook",
@@ -4762,8 +4854,11 @@ pub async fn handle_hash(
     }
 
     let password = if password.is_empty() {
-        // login without password, the remote side can click accept
-        if !request_approval {
+        // login without password, the remote side can click accept.
+        // npf: no dialog yet, the peer says when it wants a password (Empty
+        // Password); its owner's devices and members get in with none.
+        let npf = crate::npf_net::parse_target(&lc.read().unwrap().id).is_some();
+        if !request_approval && !npf {
             interface.msgbox("input-password", "Password Required", "", "");
         }
         Vec::new()

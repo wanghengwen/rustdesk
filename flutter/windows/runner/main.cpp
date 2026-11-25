@@ -118,12 +118,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
         }
         // Dispatch command line arguments
         DispatchToUniLinksDesktop(hwnd);
-      } else {
-        // Not called with arguments, or just open the app shortcut on desktop.
-        // So we just show the main window instead.
-        ::ShowWindow(hwnd, SW_NORMAL);
-        ::SetForegroundWindow(hwnd);
       }
+      // Not called with arguments: npf keeps the main window hidden (npf's
+      // console and tray open the sessions), so there is nothing to show
       return EXIT_FAILURE;
     }
   }

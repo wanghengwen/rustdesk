@@ -800,7 +800,7 @@ impl Connection {
                             conn.send(msg_out).await;
                             conn.chat_unanswered = false;
                         }
-                        ipc::Data::SwitchPermission{name, enabled} => {
+                        ipc::Data::SwitchPermission{name, enabled} if crate::npf_net::permits(&conn.ip, &name, enabled) => {
                             log::info!("Change permission {} -> {}", name, enabled);
                             if &name == "keyboard" {
                                 conn.keyboard = enabled;
@@ -1183,6 +1183,10 @@ impl Connection {
                     conn.file_remove_log_control.on_timer().drain(..).map(|x| conn.send_to_cm(x)).count();
                     #[cfg(feature = "hwcodec")]
                     conn.update_supported_encoding();
+                    // npf: the video's bitrate follows the session's congestion control
+                    if let Some(kbps) = crate::npf_net::video_kbps(&conn.stream) {
+                        video_service::VIDEO_QOS.lock().unwrap().user_npf_rate(conn.inner.id, kbps);
+                    }
                 }
                 _ = test_delay_timer.tick() => {
                     if last_recv_time.elapsed() >= SEC30 {
@@ -2108,6 +2112,8 @@ impl Connection {
         .into();
 
         let mut sub_service = false;
+        #[cfg(target_os = "macos")]
+        let mut mac_input = true;
         #[allow(unused_mut)]
         let mut wait_session_id_confirm = false;
         #[cfg(windows)]
@@ -2146,6 +2152,20 @@ impl Connection {
             pi.encoding = Some(supported_encoding).into();
             if let Some(msg_out) = super::display_service::is_inited_msg() {
                 self.send(msg_out).await;
+            }
+            // without Screen Recording no picture ever comes: said, not waited for
+            #[cfg(target_os = "macos")]
+            {
+                let screen;
+                let who = crate::npf_net::peer_name(&self.ip).unwrap_or_else(|| self.lr.my_name.clone());
+                (screen, mac_input) = crate::platform::macos::ask_permissions(Some(&who));
+                if !screen {
+                    res.set_error(crate::client::LOGIN_MAC_NO_SCREEN_RECORDING.to_owned());
+                    let mut msg_out = Message::new();
+                    msg_out.set_login_response(res);
+                    self.send(msg_out).await;
+                    return true;
+                }
             }
 
             try_activate_screen();
@@ -2235,6 +2255,18 @@ impl Connection {
         } else if sub_service {
             if !wait_session_id_confirm {
                 self.try_sub_monitor_services();
+            }
+            #[cfg(target_os = "macos")]
+            if !mac_input {
+                let mut msg_out = Message::new();
+                msg_out.set_message_box(MessageBox {
+                    msgtype: "nook-nocancel-hasclose".to_owned(),
+                    title: "Prompt".to_owned(),
+                    text: "oudesk-mac-no-accessibility-tip".to_owned(),
+                    link: "".to_owned(),
+                    ..Default::default()
+                });
+                self.send(msg_out).await;
             }
         }
         true
@@ -2397,6 +2429,7 @@ impl Connection {
             block_input: self.block_input,
             privacy_mode: self.privacy_mode,
             from_switch: self.from_switch,
+            npf: crate::npf_net::cm_info(&self.ip, self.inner.id(), authorized),
         });
     }
 
@@ -2859,7 +2892,9 @@ impl Connection {
         if let Some(o) = lr.option.as_ref() {
             self.options_in_login = Some(o.clone());
         }
-        self.video_ack_required = lr.video_ack_required;
+        // npf paces video itself and drops late frames: an ack never comes
+        // for those, so the sender does not wait for one
+        self.video_ack_required = lr.video_ack_required && self.stream.msg_sink().is_none();
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2882,7 +2917,7 @@ impl Connection {
             });
             #[cfg(all(windows, feature = "flutter"))]
             std::thread::spawn(move || {
-                if crate::is_server() && !crate::check_process("--tray", false) {
+                if crate::is_server() && !crate::npf_net::enabled() && !crate::check_process("--tray", false) {
                     crate::platform::run_as_user(vec!["--tray"]).ok();
                 }
             });
@@ -2995,7 +3030,9 @@ impl Connection {
                 },
             );
 
-            if !crate::common::is_direct_ip_access(&lr.username) && lr.username != Config::get_id()
+            if !crate::common::is_direct_ip_access(&lr.username)
+                && lr.username != Config::get_id()
+                && !crate::npf_net::is_npf(&self.ip)
             {
                 self.send_login_error(crate::client::LOGIN_MSG_OFFLINE)
                     .await;
@@ -3044,8 +3081,15 @@ impl Connection {
                 crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                     && is_logon();
 
-            if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
+            if crate::npf_net::auto_accept(&self.ip) {
+                // npf: one of my devices, no password and no click (src/npf_net)
+                if !self.send_logon_response_and_keep_alive().await {
+                    return false;
+                }
+                self.try_start_cm(lr.my_id, lr.my_name, self.authorized);
+            } else if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
                 || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
+                || crate::npf_net::must_click(&self.ip)
             {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
@@ -3076,6 +3120,11 @@ impl Connection {
                     }
                 }
                 self.try_start_cm(lr.my_id, lr.my_name, false);
+                // npf's client asks for the password only when told
+                if crate::npf_net::is_npf(&self.ip) {
+                    self.send_login_error(crate::client::LOGIN_MSG_PASSWORD_EMPTY)
+                        .await;
+                }
             } else {
                 let (failure, res) = self.check_failure(0).await;
                 if !res {

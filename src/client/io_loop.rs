@@ -210,7 +210,8 @@ impl<T: InvokeUiSession> Remote<T> {
                     .lock()
                     .unwrap()
                     .set_connected();
-                let is_secured = peer.is_secured();
+                // npf encrypts and authenticates its sessions (npf_net)
+                let is_secured = peer.is_secured() || stream_type == "npf";
                 let trust = crate::trusted_devices::client::Session::new(
                     &self.handler.lc.read().unwrap(),
                     is_secured,
@@ -600,6 +601,8 @@ impl<T: InvokeUiSession> Remote<T> {
             // But it' not necessary for now, because it's not a common case.
             // And it is immediately known when the input device is changed.
             crate::audio_service::set_voice_call_input_device(get_default_sound_input(), false);
+            #[cfg(target_os = "android")]
+            super::voice_playback::call_started();
             // Create a channel to receive error or closed message
             let (tx, rx) = std::sync::mpsc::channel();
             let (tx_audio_data, mut rx_audio_data) =
@@ -627,6 +630,8 @@ impl<T: InvokeUiSession> Remote<T> {
                                 false,
                             );
                             crate::audio_service::set_voice_call_input_device(None, true);
+                            #[cfg(target_os = "android")]
+                            super::voice_playback::call_ended();
                             break;
                         }
                         _ => {}
@@ -660,9 +665,16 @@ impl<T: InvokeUiSession> Remote<T> {
             });
             return Some(tx);
         }
+        // npf: Swift records (npf_ios), the call's end told by this sender
         #[cfg(target_os = "ios")]
         {
-            None
+            crate::npf_ios::call_started();
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let _ = rx.recv();
+                crate::npf_ios::call_ended();
+            });
+            Some(tx)
         }
     }
 
@@ -1554,6 +1566,11 @@ impl<T: InvokeUiSession> Remote<T> {
                 v.fps_control.inactive_counter = 0;
             }
         });
+        // npf: out of sight, 1 frame a second, not the auto fps (whose
+        // floor of 5 would take it back up to 30)
+        if self.handler.lc.read().unwrap().npf_background {
+            return;
+        }
         let custom_fps = self.handler.lc.read().unwrap().custom_fps.clone();
         let custom_fps = custom_fps.lock().unwrap().clone();
         let mut custom_fps = custom_fps.unwrap_or(30);
@@ -2919,6 +2936,8 @@ impl<T: InvokeUiSession> Remote<T> {
                 } else {
                     #[cfg(all(feature = "vram", feature = "flutter"))]
                     handler.on_texture(display, _texture);
+                    #[cfg(all(target_os = "android", feature = "flutter"))]
+                    handler.on_surface_frame(display);
                 }
             },
         );

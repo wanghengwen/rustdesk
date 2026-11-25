@@ -707,6 +707,8 @@ pub async fn start_server(is_server: bool, no_server: bool) {
             log::warn!("drm: could not spawn the availability warm ({err}); skipping it");
         }
         input_service::fix_key_down_timeout_loop();
+        #[cfg(target_os = "macos")]
+        std::thread::spawn(crate::platform::macos::log_permissions);
         #[cfg(target_os = "linux")]
         if input_service::wayland_use_uinput() {
             allow_err!(input_service::setup_uinput(0, 1920, 0, 1080).await);

@@ -197,6 +197,19 @@ impl EncoderApi for HwRamEncoder {
         ["vaapi"].iter().all(|&x| !self.config.name.contains(x))
     }
 
+    // ffmpeg's nvenc, qsv and videotoolbox (kVTEncodeFrameOptionKey_ForceKeyFrame)
+    // make the next frame an IDR frame; the others (amf, mediacodec, vaapi)
+    // ignore the request. Without it a key frame is a restart of capture and
+    // encoder, a second or so of no picture: on a path that loses frames
+    // (Wi-Fi), one after another.
+    fn request_keyframe(&mut self) -> bool {
+        if !["nvenc", "qsv", "videotoolbox"].iter().any(|&x| self.config.name.contains(x)) {
+            return false;
+        }
+        self.encoder.request_keyframe();
+        true
+    }
+
     fn latency_free(&self) -> bool {
         ["mediacodec", "videotoolbox"]
             .iter()
@@ -310,24 +323,32 @@ impl HwRamEncoder {
 pub struct HwRamDecoder {
     decoder: Decoder,
     pub info: CodecInfo,
+    // Android: the surface it renders into (its session's), kept while set
+    #[cfg(target_os = "android")]
+    surface: Option<jni::objects::GlobalRef>,
 }
 
 impl HwRamDecoder {
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
         let mut info = None;
-        let soft = CodecInfo::soft();
-        match format {
-            CodecFormat::H264 => {
-                if let Some(v) = soft.h264 {
-                    info = Some(v);
+        // iOS: VideoToolbox's only (HwCodecConfig::get); FFmpeg's software
+        // decoder is the fallback of one that fails (soft), not an ability
+        #[cfg(not(target_os = "ios"))]
+        {
+            let soft = CodecInfo::soft();
+            match format {
+                CodecFormat::H264 => {
+                    if let Some(v) = soft.h264 {
+                        info = Some(v);
+                    }
                 }
-            }
-            CodecFormat::H265 => {
-                if let Some(v) = soft.h265 {
-                    info = Some(v);
+                CodecFormat::H265 => {
+                    if let Some(v) = soft.h265 {
+                        info = Some(v);
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
         if enable_hwcodec_option() {
             let best = CodecInfo::prioritized(HwCodecConfig::get().ram_decode);
@@ -360,14 +381,86 @@ impl HwRamDecoder {
             thread_count: codec_thread_num(16) as _,
         };
         match Decoder::new(ctx) {
-            Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
+            Ok(decoder) => Ok(HwRamDecoder {
+                decoder,
+                info,
+                #[cfg(target_os = "android")]
+                surface: None,
+            }),
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            Err(_) if Self::device(&info) => Self::soft(format),
             Err(_) => {
                 HwCodecConfig::clear(false, false);
                 Err(anyhow!(format!("Failed to create decoder")))
             }
         }
     }
+
+    // the device's own decoder: MediaCodec (Android), VideoToolbox (iOS)
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn device(info: &CodecInfo) -> bool {
+        #[cfg(target_os = "android")]
+        return info.name.contains("mediacodec");
+        #[cfg(target_os = "ios")]
+        return info.hwdevice == hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+    }
+
+    // the device's decoder would not open or decode: FFmpeg's software one
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn soft(format: CodecFormat) -> ResultType<Self> {
+        let soft = CodecInfo::soft();
+        let info = match format {
+            CodecFormat::H264 => soft.h264,
+            CodecFormat::H265 => soft.h265,
+            _ => None,
+        };
+        log::warn!("hardware decoder failed, try {info:?}");
+        let Some(info) = info else {
+            bail!("unsupported format: {:?}", format);
+        };
+        let ctx = DecodeContext {
+            name: info.name.clone(),
+            device_type: info.hwdevice.clone(),
+            thread_count: codec_thread_num(16) as _,
+        };
+        match Decoder::new(ctx) {
+            Ok(decoder) => Ok(HwRamDecoder {
+                decoder,
+                info,
+                #[cfg(target_os = "android")]
+                surface: None,
+            }),
+            Err(_) => Err(anyhow!(format!("Failed to create decoder"))),
+        }
+    }
     pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
+        #[cfg(target_os = "android")]
+        if self.info.name.contains("mediacodec") {
+            let surface = crate::android::surface::codec_surface();
+            let raw = |s: &Option<jni::objects::GlobalRef>| {
+                s.as_ref()
+                    .map_or(std::ptr::null_mut(), |s| s.as_obj().as_raw() as *mut std::ffi::c_void)
+            };
+            if raw(&surface) != raw(&self.surface) {
+                unsafe { self.decoder.set_surface(raw(&surface)) };
+                self.surface = surface; // the old one let go of after
+            }
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if Self::device(&self.info) {
+            if self.decoder.decode(data).is_ok() {
+                let frames = self.decoder.frames();
+                return Ok(frames
+                    .iter()
+                    .map(|f| HwRamDecoderImage { frame: f })
+                    .collect());
+            }
+            let format = match self.info.format {
+                DataFormat::H264 => CodecFormat::H264,
+                _ => CodecFormat::H265,
+            };
+            *self = Self::soft(format)?;
+        }
         match self.decoder.decode(data) {
             Ok(v) => Ok(v.iter().map(|f| HwRamDecoderImage { frame: f }).collect()),
             Err(e) => Err(anyhow!(e)),
@@ -380,6 +473,14 @@ pub struct HwRamDecoderImage<'a> {
 }
 
 impl HwRamDecoderImage<'_> {
+    /// Android: the frame's size if MediaCodec showed it on the video surface
+    /// (crate::android::surface) already; such a frame has no pixels
+    #[cfg(target_os = "android")]
+    pub fn on_surface(&self) -> Option<(usize, usize)> {
+        (self.frame.pixfmt == AVPixelFormat::AV_PIX_FMT_MEDIACODEC)
+            .then(|| (self.frame.width as usize, self.frame.height as usize))
+    }
+
     // rgb [in/out] fmt and stride must be set in ImageRgb
     pub fn to_fmt(&self, rgb: &mut ImageRgb, i420: &mut Vec<u8>) -> ResultType<()> {
         let frame = self.frame;
@@ -474,6 +575,8 @@ impl HwRamDecoderImage<'_> {
                     height,
                 ));
             }
+            // on the video surface (on_surface): no pixels
+            AVPixelFormat::AV_PIX_FMT_MEDIACODEC => bail!("no pixels: on the surface"),
         }
         Ok(())
     }
@@ -556,7 +659,9 @@ impl HwCodecConfig {
                 },
             ];
             let mut e = vec![];
+            let mut d = vec![];
             if let Some(info) = info {
+                d = android_ram_decoders(&info);
                 ts.iter().for_each(|t| {
                     let codecs: Vec<_> = info
                         .codecs
@@ -599,6 +704,7 @@ impl HwCodecConfig {
             log::debug!("e: {e:?}");
             HwCodecConfig {
                 ram_encode: e,
+                ram_decode: d,
                 ..Default::default()
             }
         }
@@ -631,9 +737,23 @@ impl HwCodecConfig {
         {
             CONFIG.lock().unwrap().clone().unwrap_or_default()
         }
+        // iOS: VideoToolbox's decoders, tried once in this process (a test
+        // decode each; no check process here) and kept; no encoders
         #[cfg(target_os = "ios")]
         {
-            HwCodecConfig::default()
+            let mut c = CONFIG.lock().unwrap();
+            if c.is_none() {
+                let mut d = Decoder::available_decoders();
+                d.retain(|i| {
+                    i.hwdevice == hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX
+                });
+                log::info!("VideoToolbox decoders: {d:?}");
+                *c = Some(HwCodecConfig {
+                    ram_decode: d,
+                    ..Default::default()
+                });
+            }
+            c.clone().unwrap_or_default()
         }
     }
 
@@ -763,4 +883,27 @@ pub fn start_check_process() {
     ONCE.call_once(|| {
         std::thread::spawn(f);
     });
+}
+
+// FFmpeg's MediaCodec decoders (NDK) for the formats the device decodes in
+// hardware; HwRamDecoder::new falls back to software when one does not open
+#[cfg(target_os = "android")]
+fn android_ram_decoders(info: &crate::android::ffi::MediaCodecInfos) -> Vec<CodecInfo> {
+    let mut d = vec![];
+    for (prefix, format) in [("h264", DataFormat::H264), ("hevc", DataFormat::H265)] {
+        let hw = info.codecs.iter().find(|c| {
+            !c.is_encoder && c.hw == Some(true) && c.mime_type.as_str() == get_mime_type(format)
+        });
+        if let Some(c) = hw {
+            log::debug!("hardware {prefix} decoder: {}", c.name);
+            d.push(CodecInfo {
+                name: format!("{prefix}_mediacodec"),
+                mc_name: None,
+                format,
+                hwdevice: hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
+                priority: 0,
+            });
+        }
+    }
+    d
 }

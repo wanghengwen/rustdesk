@@ -502,6 +502,40 @@ class ServerInfo extends StatelessWidget {
       }
     }
 
+    // npf share code: whoever types it as the ID connects through npf
+    List<Widget> npfShareRows() {
+      final parts = serverModel.npfShare.split('\t');
+      if (parts.length != 2 || parts[0].isEmpty) return [];
+      final until = DateTime.fromMillisecondsSinceEpoch(
+          (int.tryParse(parts[1]) ?? 0) * 1000);
+      String two(int v) => v.toString().padLeft(2, '0');
+      return [
+        Row(children: [
+          const Icon(Icons.share_outlined, color: Colors.grey, size: iconSize)
+              .marginOnly(right: iconMarginRight),
+          Expanded(
+            child: Text(
+              '${translate("Share code")} · ${translate("Valid until")} ${two(until.hour)}:${two(until.minute)}',
+              style: textStyleHeading,
+            ),
+          )
+        ]),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Expanded(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(parts[0], style: textStyleValue),
+            ),
+          ),
+          IconButton(
+              visualDensity: VisualDensity.compact,
+              icon: Icon(Icons.copy_outlined),
+              onPressed: () => copyToClipboard(parts[0]))
+        ]).marginOnly(left: 39, bottom: 15),
+      ];
+    }
+
     final showOneTime = serverModel.approveMode != 'click' &&
         serverModel.verificationMethod != kUsePermanentPassword;
     return PaddingCard(
@@ -560,6 +594,7 @@ class ServerInfo extends StatelessWidget {
                           })
                     ])
             ]).marginOnly(left: 40, bottom: 15),
+            ...npfShareRows(),
             ConnectionStateNotification()
           ],
         ));

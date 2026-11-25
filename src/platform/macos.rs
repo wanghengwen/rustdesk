@@ -153,6 +153,242 @@ pub fn is_can_screen_recording(prompt: bool) -> bool {
     autoreleasepool(|| unsafe_is_can_screen_recording(prompt))
 }
 
+/// What a controlled Mac needs: Screen Recording, and Accessibility for the
+/// mouse and keyboard (RustDesk asks for them in its main window only; ouDesk
+/// under npf runs without it). Logged when the server starts; asked for when
+/// someone wants this screen (`who` is shown, None: "someone"): a dialog says
+/// which permissions, why and what happens once they are on, with the
+/// system's own alerts (their "Open System Settings") the first time in a
+/// process, else over the Privacy & Security page it opened; all that is
+/// missing at once (the user 2026-11-16: "在要“录屏”权限的时候不是应该顺便把其他的权限也要了吗？"),
+/// once a minute at most, one dialog at a time. The user's word (2026-11-16):
+/// "在用户需要的时候自动打开让用户配置并通过对话框明确告诉用户需要这个打开了以后才能使用".
+/// Returns (screen, input); at the login window (nobody's grants) both true.
+pub fn ask_permissions(who: Option<&str>) -> (bool, bool) {
+    let (screen, input) = permissions();
+    if screen && input {
+        return (screen, input);
+    }
+    if !screen {
+        watch_screen_recording();
+    }
+    static ASKED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut asked = ASKED.lock().unwrap();
+    if asked.map_or(true, |t| t.elapsed().as_secs() >= 60) {
+        *asked = Some(std::time::Instant::now());
+        let key = match (screen, input) {
+            (false, false) => "oudesk-mac-ask-both",
+            (false, true) => "oudesk-mac-ask-screen",
+            _ => "oudesk-mac-ask-input",
+        };
+        let (title, text) = (format!("{key}-title"), key);
+        let missing: Vec<&str> = [(!screen, "ScreenCapture"), (!input, "Accessibility")]
+            .into_iter()
+            .filter_map(|(m, s)| m.then_some(s))
+            .collect();
+        // the page opened shows one of them: the first
+        let page = if !screen { "Privacy_ScreenCapture" } else { "Privacy_Accessibility" };
+        // The system's request is what puts ouDesk on the page's list, and it
+        // shows its own alert with "Open System Settings": then the page is
+        // left to it, the dialog says so (both opened read twice, the user
+        // 2026-11-16: "有点啰嗦"). Later in this process the entry is there and
+        // the system says nothing: the page is opened here.
+        // all or none: in one process the grants are cleared together
+        let system = missing.iter().all(|s| reset_grant_once(s)) && system_request(&missing);
+        let text = if system {
+            format!("{text}-system")
+        } else {
+            Command::new("open")
+                .arg(format!("x-apple.systempreferences:com.apple.preference.security?{page}"))
+                .spawn()
+                .ok();
+            text.to_owned()
+        };
+        log::info!("macOS permissions: screen recording {screen}, accessibility {input}: asking (the system's alert: {system})");
+        let tr = |k: &str| crate::client::translate(k.to_owned());
+        let who = match who.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(w) => tr("oudesk-mac-ask-named").replace("{name}", w),
+            None => tr("oudesk-mac-ask-someone"),
+        };
+        permission_dialog(&tr(&title), &tr(&text).replace("{who}", &who), &tr("OK"));
+    }
+    (screen, input)
+}
+
+/// A grant that is missing may still be there, switched on, for another build:
+/// the system keeps the code requirement of the build that first asked (an ad
+/// hoc one: its cdhash) and a switch in Settings changes only on or off, so
+/// the switch shows on and nothing holds (2026-11-16, the Mac mini after test
+/// builds). Cleared before asking, the system asks again and records this
+/// build. Once a process: a grant made while this one runs (Screen Recording
+/// holds from the next start) must not be cleared by the next ask.
+/// true: cleared now (the system's request that follows shows its alert).
+fn reset_grant_once(service: &str) -> bool {
+    static DONE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut done = DONE.lock().unwrap();
+    if done.iter().any(|s| s == service) {
+        return false;
+    }
+    done.push(service.to_owned());
+    let id: Option<String> = autoreleasepool(|| unsafe {
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+        let bid: id = msg_send![bundle, bundleIdentifier];
+        if bid == nil {
+            None
+        } else {
+            let c: *const std::os::raw::c_char = msg_send![bid, UTF8String];
+            Some(std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned())
+        }
+    });
+    let Some(id) = id.filter(|i| !i.is_empty()) else {
+        return false;
+    };
+    let ok = Command::new("tccutil")
+        .args(["reset", service, &id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    log::info!("macOS permissions: {service} of {id} cleared before asking: {ok}");
+    ok
+}
+
+/// The system's request for `service` from a new process (`--ask-permission`,
+/// [`request_permission`]): in the server it is answered from what the
+/// process read before, the clearing unseen, and no alert shows (the Mac mini
+/// 2026-11-16, macOS 27: the request never reached the system).
+/// true: the process is on its way.
+fn system_request(services: &[&str]) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    match Command::new(exe)
+        .arg("--ask-permission")
+        .args(services)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait().ok());
+            true
+        }
+        Err(e) => {
+            log::warn!("macOS permissions: the system's request for {services:?}: {e}");
+            false
+        }
+    }
+}
+
+/// `--ask-permission <service>...`: the system's requests, their alerts; the
+/// process stays a minute while they are up.
+pub fn request_permission(services: &[String]) {
+    for service in services {
+        match service.as_str() {
+            "ScreenCapture" => {
+                is_can_screen_recording(true);
+            }
+            "Accessibility" => {
+                is_process_trusted(true);
+            }
+            _ => {}
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_secs(60));
+}
+
+/// (screen, input) now, asking nothing; at the login window both true.
+pub fn permissions() -> (bool, bool) {
+    if is_prelogin() {
+        return (true, true);
+    }
+    (is_can_screen_recording(false), is_process_trusted(false))
+}
+
+/// The server's start: what it has, in the log (asked for when needed).
+pub fn log_permissions() {
+    let (screen, input) = permissions();
+    log::info!("macOS permissions: screen recording {screen}, accessibility {input}");
+}
+
+/// An AppleScript string literal of `s`.
+fn applescript_str(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The dialog of [`ask_permissions`], from osascript (the server has no
+/// window of its own), in front, with ouDesk's icon; it closes itself after
+/// 10 minutes, and a second one waits for the first to go.
+fn permission_dialog(title: &str, text: &str, ok: &str) {
+    static OPEN: Mutex<Option<std::process::Child>> = Mutex::new(None);
+    let mut open = OPEN.lock().unwrap();
+    if let Some(c) = open.as_mut() {
+        if matches!(c.try_wait(), Ok(None)) {
+            return;
+        }
+    }
+    let icon = std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.parent()?.join("Resources/AppIcon.icns")))
+        .filter(|p| p.exists())
+        .map(|p| format!("POSIX file {}", applescript_str(&p.to_string_lossy())))
+        .unwrap_or_else(|| "caution".to_owned());
+    let script = format!(
+        "display dialog {} with title {} buttons {{{}}} default button 1 with icon {} giving up after 600",
+        applescript_str(text),
+        applescript_str(title),
+        applescript_str(ok),
+        icon
+    );
+    match Command::new("osascript")
+        // after the Settings page it opened, which would cover it
+        .args(["-e", "delay 1", "-e", "activate", "-e", &script])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => *open = Some(c),
+        Err(e) => log::warn!("macOS permissions: no dialog: {e}"),
+    }
+}
+
+/// Screen Recording granted while the server runs holds from its next start
+/// (macOS offers "Quit & Reopen", which would end the server for good:
+/// launchd starts it again after a failure only). Looked at from a new process
+/// every few seconds; once granted the server exits for launchd to start it.
+fn watch_screen_recording() {
+    static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WATCHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let granted = move |what: &str| {
+        Command::new(&exe)
+            .arg(what)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if granted("--screen-recording") {
+            // Accessibility, asked for with it: its alert would go with the
+            // server, so up to a minute for that one first
+            let t = std::time::Instant::now();
+            while t.elapsed().as_secs() < 60 && !granted("--accessibility") {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            log::info!("macOS permissions: screen recording granted: restarting the server");
+            std::process::exit(1);
+        }
+    });
+}
+
 // macOS >= 10.15
 // https://stackoverflow.com/questions/56597221/detecting-screen-recording-settings-on-macos-catalina/
 // remove just one app from all the permissions: tccutil reset All com.carriez.rustdesk
@@ -224,8 +460,8 @@ pub fn install_service() -> bool {
 // No need to merge the existing dup code, because the code in these two functions are too critical.
 // New code should be written in a common function.
 pub fn is_installed_daemon(prompt: bool) -> bool {
-    let daemon = format!("{}_service.plist", crate::get_full_name());
-    let agent = format!("{}_server.plist", crate::get_full_name());
+    let daemon = format!("{LAUNCHD}_service.plist");
+    let agent = format!("{LAUNCHD}_server.plist");
     let agent_plist_file = format!("/Library/LaunchAgents/{}", agent);
     if !prompt {
         // in macos 13, there is new way to check if they are running or enabled, https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos#Respond-to-changes-in-System-Settings
@@ -362,8 +598,14 @@ fn update_daemon_agent(agent_plist_file: String, update_source: UpdateSource) ->
     func()
 }
 
+/// npf: the stem of ouDesk's launchd labels and plists (the daemon
+/// STEM_service, the agent STEM_server; upstream com.carriez.RustDesk)
+pub(crate) const LAUNCHD: &str = "com.luopingtech.oudesk";
+
 fn correct_app_name(s: &str) -> String {
-    let mut s = s.to_owned();
+    let mut s = s
+        .replace("com.carriez.RustDesk_service", &format!("{LAUNCHD}_service"))
+        .replace("com.carriez.RustDesk_server", &format!("{LAUNCHD}_server"));
     if let Some(bundleid) = get_bundle_id() {
         s = s.replace("com.carriez.rustdesk", &bundleid);
     }
@@ -395,14 +637,8 @@ fn write_plist_atomically(path: &str, body: &str) -> ResultType<()> {
 }
 
 pub fn write_plists() -> ResultType<()> {
-    let daemon_plist_path = format!(
-        "/Library/LaunchDaemons/com.carriez.{}_service.plist",
-        crate::get_app_name()
-    );
-    let agent_plist_path = format!(
-        "/Library/LaunchAgents/com.carriez.{}_server.plist",
-        crate::get_app_name()
-    );
+    let daemon_plist_path = format!("/Library/LaunchDaemons/{LAUNCHD}_service.plist");
+    let agent_plist_path = format!("/Library/LaunchAgents/{LAUNCHD}_server.plist");
     let Some(daemon_plist) = PRIVILEGES_SCRIPTS_DIR.get_file("daemon.plist") else {
         bail!("daemon.plist not found in embedded resources");
     };
@@ -444,7 +680,7 @@ pub fn uninstall_service(show_new_window: bool, sync: bool) -> bool {
                 log::error!("run osascript failed: {}", e);
             }
             _ => {
-                let agent = format!("{}_server.plist", crate::get_full_name());
+                let agent = format!("{LAUNCHD}_server.plist");
                 let agent_plist_file = format!("/Library/LaunchAgents/{}", agent);
                 let uninstalled = !std::path::Path::new(&agent_plist_file).exists();
                 log::info!(
@@ -460,7 +696,7 @@ pub fn uninstall_service(show_new_window: bool, sync: bool) -> bool {
                     }
                     crate::ipc::set_option("stop-service", "Y");
                     std::process::Command::new("launchctl")
-                        .args(&["remove", &format!("{}_server", crate::get_full_name())])
+                        .args(&["remove", &format!("{LAUNCHD}_server")])
                         .status()
                         .ok();
                     if show_new_window {
@@ -976,7 +1212,7 @@ fn update_me_from_source(update_source: UpdateSource) -> ResultType<()> {
 
     // Include launchd jobs in the transaction only while the installed service is enabled.
     if is_installed_daemon && !is_service_stopped {
-        let agent = format!("{}_server.plist", crate::get_full_name());
+        let agent = format!("{LAUNCHD}_server.plist");
         let agent_plist_file = format!("/Library/LaunchAgents/{}", agent);
         update_daemon_agent(agent_plist_file, update_source)?;
     } else {
@@ -1226,8 +1462,8 @@ pub fn update_from_dmg_as_root(dmg_path: &str, expected_version: &str) -> Result
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    let agent_plist = format!("/Library/LaunchAgents/com.carriez.{}_server.plist", app_name);
-    let daemon_plist = format!("/Library/LaunchDaemons/com.carriez.{}_service.plist", app_name);
+    let agent_plist = format!("/Library/LaunchAgents/{LAUNCHD}_server.plist");
+    let daemon_plist = format!("/Library/LaunchDaemons/{LAUNCHD}_service.plist");
 
     log::info!("[root-update] Starting silent root update from {}", dmg_path);
     // Check sessions before extracting to avoid unnecessary work
@@ -1359,8 +1595,8 @@ pub fn update_from_dmg_as_root(dmg_path: &str, expected_version: &str) -> Result
     // Write a shell script that runs detached after this function returns.
     // We cannot directly replace /Applications/RustDesk.app while it is running,
     // so we spawn a script that waits, kills processes, copies, and restarts.
-    let daemon_label = format!("com.carriez.{}_service", app_name);
-    let agent_label = format!("com.carriez.{}_server", app_name);
+    let daemon_label = format!("{LAUNCHD}_service");
+    let agent_label = format!("{LAUNCHD}_server");
     let script_path = format!("{}/rustdesk_update.sh", tmp_dir);
     let script = format!(
         r#"#!/bin/sh

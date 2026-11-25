@@ -15,8 +15,6 @@
 use super::*;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 use hbb_common::anyhow::anyhow;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use magnum_opus::Application::LowDelay;
 use magnum_opus::{Channels::*, Encoder};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -113,7 +111,7 @@ mod pa_impl {
         let mut encoder = AudioEncoder::new(Encoder::new(
             crate::platform::PA_SAMPLE_RATE,
             Stereo,
-            LowDelay,
+            opus_application(),
         )?);
         #[cfg(target_os = "linux")]
         allow_err!(
@@ -634,8 +632,25 @@ struct AudioEncoder {
     zero_count: u16,
 }
 
+/// With npf the audio stream may lose frames (it does not wait for late
+/// ones): Opus in-band FEC carries each frame's coarse copy in the next. It
+/// needs SILK or hybrid modes, which LowDelay (CELT only) never uses, so the
+/// encoder is the general one then (about 5 ms more look-ahead).
+fn opus_application() -> magnum_opus::Application {
+    if crate::npf_net::enabled() {
+        magnum_opus::Application::Audio
+    } else {
+        magnum_opus::Application::LowDelay
+    }
+}
+
 impl AudioEncoder {
-    fn new(encoder: Encoder) -> Self {
+    fn new(mut encoder: Encoder) -> Self {
+        if crate::npf_net::enabled() {
+            allow_err!(encoder.set_inband_fec(true));
+            // the loss it plans for: 10%
+            allow_err!(encoder.set_packet_loss_perc(10));
+        }
         Self {
             encoder,
             zero_count: 0,

@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.view.Surface
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.media.MediaCodecInfo
@@ -39,6 +40,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.android.FlutterView
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
 import kotlin.concurrent.thread
 import java.io.File
 import java.io.FileInputStream
@@ -77,6 +79,21 @@ class MainActivity : FlutterActivity() {
     private val documentPicker by lazy { DocumentPicker(this) }
 
     private var isAudioStart = false
+
+    // the remote screen's video surface: a Flutter Texture that the decoders
+    // render into (Rust scrap android::surface)
+    private var frameTexture: TextureRegistry.SurfaceTextureEntry? = null
+    private var frameSurface: Surface? = null
+    private var frameKey = "" // its session's (Rust's key)
+
+    private fun releaseFrameSurface() {
+        if (frameKey.isNotEmpty()) FFI.setFrameSurface(frameKey, null)
+        frameKey = ""
+        frameSurface?.release()
+        frameSurface = null
+        frameTexture?.release()
+        frameTexture = null
+    }
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -255,6 +272,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         documentPicker.close()
+        releaseFrameSurface()
         Log.e(logTag, "onDestroy")
         // The process can outlive the UI whenever something keeps it alive:
         // MainService, or the accessibility InputService on its own. Only the
@@ -668,6 +686,24 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                 }
+                "create_frame_surface" -> {
+                    releaseFrameSurface()
+                    val entry = flutterEngine?.renderer?.createSurfaceTexture()
+                    if (entry == null) {
+                        result.success(-1)
+                    } else {
+                        val surface = Surface(entry.surfaceTexture())
+                        frameTexture = entry
+                        frameSurface = surface
+                        frameKey = call.arguments as? String ?: ""
+                        FFI.setFrameSurface(frameKey, surface)
+                        result.success(entry.id().toInt())
+                    }
+                }
+                "release_frame_surface" -> {
+                    releaseFrameSurface()
+                    result.success(null)
+                }
                 "on_voice_call_started" -> {
                     onVoiceCallStarted()
                 }
@@ -958,7 +994,7 @@ class MainActivity : FlutterActivity() {
                 codecObject.put("surface", surface)
                 val nv12 = caps.colorFormats.contains(COLOR_FormatYUV420SemiPlanar)
                 codecObject.put("nv12", nv12)
-                if (!(nv12 || surface)) {
+                if (codec.isEncoder && !(nv12 || surface)) {
                     return@forEach
                 }
                 codecObject.put("min_bitrate", caps.videoCapabilities.bitrateRange.lower / 1000)
@@ -967,9 +1003,6 @@ class MainActivity : FlutterActivity() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         codecObject.put("low_latency", caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency))
                     }
-                }
-                if (!codec.isEncoder) {
-                    return@forEach
                 }
                 codecArray.put(codecObject)
             }

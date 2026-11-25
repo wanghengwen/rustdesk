@@ -174,12 +174,14 @@ async fn connect_and_login(
     } else {
         ConnType::PORT_FORWARD
     };
-    let ((mut stream, direct, pk, _kcp, _stream_type), (feedback, rendezvous_server)) =
+    let ((mut stream, direct, pk, _kcp, stream_type), (feedback, rendezvous_server)) =
         Client::start(id, key, token, conn_type, interface.clone()).await?;
+    // npf encrypts and authenticates its sessions (npf_net)
+    let secured = stream.is_secured() || stream_type == "npf";
     let mut trust = crate::trusted_devices::client::Session::new(
-        &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
+        &interface.get_lch().read().unwrap(), secured, pk.as_deref())?;
     interface.update_direct(Some(direct));
-    if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
+    if !secured && !crate::common::is_direct_ip_access(id) {
         if !confirm_insecure_connection(&interface, ui_receiver).await {
             *close_port_forward = true;
             return Ok(None);
@@ -421,12 +423,14 @@ async fn connect_and_login_mux(
     } else {
         ConnType::PORT_FORWARD
     };
-    let ((mut stream, direct, pk, _kcp, _stream_type), (feedback, rendezvous_server)) =
+    let ((mut stream, direct, pk, _kcp, stream_type), (feedback, rendezvous_server)) =
         Client::start(id, key, token, conn_type, interface.clone()).await?;
+    // npf encrypts and authenticates its sessions (npf_net)
+    let secured = stream.is_secured() || stream_type == "npf";
     let mut trust = crate::trusted_devices::client::Session::new(
-        &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
+        &interface.get_lch().read().unwrap(), secured, pk.as_deref())?;
     interface.update_direct(Some(direct));
-    if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
+    if !secured && !crate::common::is_direct_ip_access(id) {
         if !confirm_insecure_connection(&interface, ui_receiver).await {
             *close_port_forward = true;
             return Ok(None);

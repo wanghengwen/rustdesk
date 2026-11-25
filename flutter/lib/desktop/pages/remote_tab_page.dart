@@ -491,6 +491,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         windowOnTop(windowId());
       }
       return jumpOk;
+    } else if (call.method == 'npf_close_session') {
+      // npf's "end" on the home page (npf/npf_backend_rust.dart)
+      final has = tabController.state.value.tabs.any((e) => e.key == call.arguments);
+      if (has) tabController.closeBy(call.arguments);
+      return has;
     } else if (call.method == kWindowEventActiveDisplaySession) {
       final args = jsonDecode(call.arguments);
       final id = args['id'];

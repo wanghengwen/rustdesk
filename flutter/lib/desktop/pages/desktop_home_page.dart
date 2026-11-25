@@ -24,6 +24,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:window_size/window_size.dart' as window_size;
 import '../widgets/button.dart';
+import 'package:flutter_hbb/npf/npf_glue.dart';
 
 class DesktopHomePage extends StatefulWidget {
   const DesktopHomePage({Key? key}) : super(key: key);
@@ -48,6 +49,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsInputMonitoring = false;
   var watchIsCanRecordAudio = false;
   Timer? _updateTimer;
+  // npf: "CODE\tEXPIRES" from the server process, or ""
+  final RxString npfShare = ''.obs;
   bool isCardClosed = false;
 
   final RxBool _editHover = false.obs;
@@ -58,6 +61,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (kNpfUi && !bind.isIncomingOnly()) {
+      return _buildBlock(
+          child: npfHomePage(
+              notices: Obx(() => buildHelpCards(stateGlobal.updateUrl.value))));
+    }
     final isIncomingOnly = bind.isIncomingOnly();
     return _buildBlock(
         child: Row(
@@ -91,6 +99,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       ),
       buildTip(context),
       if (!isOutgoingOnly) buildIDBoard(context),
+      if (!isOutgoingOnly) buildNpfShareBoard(context),
       if (!isOutgoingOnly) buildPasswordBoard(context),
       FutureBuilder<Widget>(
         future: Future.value(
@@ -251,6 +260,76 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         ],
       ),
     );
+  }
+
+  // npf: the share code others connect with (typed as the ID), a new one
+  // every 2 hours, each good for 4; hidden without npf
+  Widget buildNpfShareBoard(BuildContext context) {
+    return Obx(() {
+      final parts = npfShare.value.split('\t');
+      if (parts.length != 2 || parts[0].isEmpty) return const Offstage();
+      final code = parts[0];
+      final until = DateTime.fromMillisecondsSinceEpoch(
+          (int.tryParse(parts[1]) ?? 0) * 1000);
+      String two(int v) => v.toString().padLeft(2, '0');
+      final textColor = Theme.of(context).textTheme.titleLarge?.color;
+      copy() {
+        Clipboard.setData(ClipboardData(text: code));
+        showToast(translate("Copied"));
+      }
+
+      return Container(
+        margin: const EdgeInsets.only(left: 20, right: 16, top: 13),
+        child: Row(
+          children: [
+            Container(
+              width: 2,
+              height: 52,
+              decoration: const BoxDecoration(color: MyTheme.accent),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(left: 7),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    AutoSizeText(
+                      '${translate("Share code")} · ${translate("Valid until")} ${two(until.hour)}:${two(until.minute)}',
+                      style: TextStyle(
+                          fontSize: 14, color: textColor?.withOpacity(0.5)),
+                      maxLines: 1,
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: GestureDetector(
+                            onDoubleTap: copy,
+                            // one line in the narrow pane: smaller, never wrapped
+                            child: AutoSizeText(code,
+                                    maxLines: 1,
+                                    minFontSize: 12,
+                                    style: const TextStyle(fontSize: 22))
+                                .marginOnly(top: 6, bottom: 6),
+                          ),
+                        ),
+                        InkWell(
+                          onTap: copy,
+                          child: Tooltip(
+                            message: translate("Copy to clipboard"),
+                            child: const Icon(Icons.copy,
+                                size: 20, color: Color(0xFFDDDDDD)),
+                          ),
+                        ).marginOnly(right: 8),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    });
   }
 
   Widget buildPopupMenu(BuildContext context) {
@@ -701,6 +780,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     super.initState();
     _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
       await gFFI.serverModel.fetchID();
+      npfShare.value = await bind.mainGetCommon(key: 'npf-share');
       final error = await bind.mainGetError();
       if (systemError != error) {
         systemError = error;

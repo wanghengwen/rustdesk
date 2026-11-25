@@ -41,6 +41,17 @@ mod bridge_generated;
 pub mod flutter;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 pub mod flutter_ffi;
+/// ouDesk in npf's Android app without Flutter: the sessions driven from Kotlin
+#[cfg(target_os = "android")]
+pub mod npf_jni;
+/// ouDesk in npf's iOS app without Flutter: the sessions driven from Swift
+#[cfg(target_os = "ios")]
+pub mod npf_ios;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod npf_desk;
+/// The device the peer's sound is played on
+#[cfg(not(target_os = "linux"))]
+mod npf_audio_out;
 use common::*;
 mod auth_2fa;
 mod trusted_devices;
@@ -78,3 +89,5 @@ pub mod privacy_mode;
 pub mod virtual_display_manager;
 
 mod kcp_stream;
+/// RustDesk over npf (libnpf): `npf:NUMBER` IDs
+pub mod npf_net;

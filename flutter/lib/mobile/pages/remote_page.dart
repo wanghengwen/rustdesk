@@ -15,6 +15,8 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
+import '../../npf/npf_glue.dart';
+import '../../npf/npf_session.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
@@ -123,6 +125,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
+    unawaited(gFFI.imageModel.createSurface());
     gFFI.start(
       widget.id,
       loginMethod: widget.loginMethod,
@@ -201,6 +204,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);
     gFFI.inputModel.listenToMouse(false);
     gFFI.imageModel.disposeImage();
+    unawaited(gFFI.imageModel.releaseSurface());
     gFFI.cursorModel.disposeImages();
     await gFFI.invokeMethod("enable_soft_keyboard", true);
     _mobileFocusNode.dispose();
@@ -496,7 +500,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
     return WillPopScope(
       onWillPop: () async {
-        clientClose(sessionId, gFFI);
+        (npfLeaveSession ?? () => clientClose(sessionId, gFFI))();
         return false;
       },
       child: Scaffold(
@@ -660,7 +664,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                             ]) +
                   (isWeb
                       ? []
-                      : <Widget>[
+                      : kNpfUi
+                          ? _npfVoiceCallButtons()
+                          : <Widget>[
                           futureBuilder(
                               future: gFFI.invokeMethod(
                                   "get_value", "KEY_IS_SUPPORT_VOICE_CALL"),
@@ -861,8 +867,46 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     }();
   }
 
+  /// ouLink's bar: a voice call button in place of the chat (no text chat);
+  /// red while calling or waiting, tapped then it ends the call. Android only
+  /// (RustDesk has no voice call on iOS): the microphone is asked for first
+  /// (the host's npf_voice_permission: the system's dialog), the host turns it
+  /// on when the peer takes the call (on_voice_call_started).
+  List<Widget> _npfVoiceCallButtons() {
+    if (!isAndroid) return [];
+    return <Widget>[
+      futureBuilder(
+          future: gFFI.invokeMethod("get_value", "KEY_IS_SUPPORT_VOICE_CALL"),
+          hasData: (supported) => supported != true
+              ? Offstage()
+              : Obx(() {
+                  final inCall = [
+                    VoiceCallStatus.waitingForResponse,
+                    VoiceCallStatus.connected
+                  ].contains(gFFI.chatModel.voiceCallStatus.value);
+                  return IconButton(
+                    tooltip:
+                        translate(inCall ? 'Stop voice call' : 'Voice call'),
+                    icon: SvgPicture.asset('assets/call_wait.svg',
+                        colorFilter: ColorFilter.mode(
+                            inCall ? Colors.redAccent : Colors.white,
+                            BlendMode.srcIn)),
+                    onPressed: () async {
+                      if (inCall) {
+                        bind.sessionCloseVoiceCall(sessionId: sessionId);
+                      } else if (await gFFI
+                              .invokeMethod("npf_voice_permission") ==
+                          true) {
+                        bind.sessionRequestVoiceCall(sessionId: sessionId);
+                      }
+                    },
+                  );
+                }))
+    ];
+  }
+
   void _registerMobileChatShortcut() {
-    if (!isMobile) return;
+    if (!isMobile || kNpfUi) return;   // no text chat in ouLink
     gFFI.shortcutModel.register(kShortcutActionToggleChat,
         () => onPressedTextChat(widget.id, requestSoftKeyboard: false));
   }
@@ -1220,6 +1264,21 @@ class ImagePaint extends StatelessWidget {
       }
     }
     final adjust = c.getAdjustY();
+    final texture = m.surfaceTexture;
+    if (texture >= 0) {
+      // where ImagePainter would draw the image
+      return Positioned(
+        left: (c.x / s).toInt() * s,
+        top: ((c.y + adjust) / s).toInt() * s,
+        width: m.imageWidth * s,
+        height: m.imageHeight * s,
+        child: Texture(
+            textureId: texture,
+            filterQuality: (s - 1.0).abs() > 0.001
+                ? FilterQuality.medium
+                : FilterQuality.none),
+      );
+    }
     return CustomPaint(
       painter: ImagePainter(
           image: m.image, x: c.x / s, y: (c.y + adjust) / s, scale: s),
@@ -1338,7 +1397,9 @@ void showOptions(
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI);
-  List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  // ouLink: no codec choice on the phone, always automatic (scrap's preference)
+  List<TRadioMenu<String>> codecRadios =
+      kNpfUi ? [] : await toolbarCodec(context, id, gFFI);
   List<TToggleMenu> cursorToggles = await toolbarCursor(context, id, gFFI);
   List<TToggleMenu> displayToggles =
       await toolbarDisplayToggle(context, id, gFFI);

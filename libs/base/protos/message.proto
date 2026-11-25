@@ -726,6 +726,9 @@ message AudioFormat {
 
 message AudioFrame { 
   bytes data = 1; 
+  // npf: frames lost just before this one (the receiver's transport sets it);
+  // Opus in-band FEC rebuilds the last of them from this frame
+  uint32 lost_before = 2;
 }
 
 // Notify peer to show message box.

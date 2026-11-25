@@ -357,6 +357,9 @@ pub enum Data {
         block_input: bool,
         privacy_mode: bool,
         from_switch: bool,
+        // npf: who asked and what they may do (src/npf_net)
+        #[serde(default)]
+        npf: Option<serde_json::Value>,
     },
     ChatMessage {
         text: String,
@@ -670,7 +673,13 @@ pub async fn start(postfix: &str) -> ResultType<()> {
                                         }
                                         continue;
                                     }
+                                    // a session's npf connection: when it is over the
+                                    // session must see this connection end
+                                    let bridge = matches!(&data, Data::Config((n, _)) if n == "npf-connect");
                                     handle(data, &mut stream).await;
+                                    if bridge {
+                                        break;
+                                    }
                                 }
                                 Ok(None) => {
                                     // `Ok(None)` means a complete frame arrived but did not
@@ -951,6 +960,11 @@ async fn handle(data: Data, stream: &mut Connection) {
                 .filter(|x| x.conn_type == crate::server::AuthConnType::Remote)
                 .count();
             allow_err!(stream.send(&Data::VideoConnCount(Some(n))).await);
+        }
+        // npf's state, assist code and connections (src/npf_net)
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Data::Config((name, value)) if name.starts_with("npf-") => {
+            crate::npf_net::ipc(&name, value, stream).await
         }
         Data::Config((name, value)) => match value {
             None => {

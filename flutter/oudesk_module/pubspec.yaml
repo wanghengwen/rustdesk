@@ -1,0 +1,59 @@
+name: oudesk_module
+description: "ouDesk in ouLink's apps (Android, iOS): RustDesk's controlling pages only (add-to-app)."
+publish_to: "none"
+
+version: 1.5.1+69
+
+environment:
+  sdk: '^3.1.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  flutter_hbb:
+    path: ../
+  get: ^4.6.5
+  provider: ^6.0.5
+
+dev_dependencies:
+  flutter_lints: ^2.0.2
+
+# flutter_hbb's overrides apply only in the root package
+dependency_overrides:
+  intl: ^0.19.0
+  flutter_plugin_android_lifecycle: 2.0.17
+
+flutter:
+  uses-material-design: true
+
+  # RustDesk loads its assets without the package prefix, so the root
+  # package bundles them (assets is a link to ../assets)
+  assets:
+    - assets/
+
+  fonts:
+    - family: GestureIcons
+      fonts:
+        - asset: assets/gestures.ttf
+    - family: Tabbar
+      fonts:
+        - asset: assets/tabbar.ttf
+    - family: PeerSearchbar
+      fonts:
+        - asset: assets/peer_searchbar.ttf
+    - family: AddressBook
+      fonts:
+        - asset: assets/address_book.ttf
+    - family: DeviceGroup
+      fonts:
+        - asset: assets/device_group.ttf
+    - family: More
+      fonts:
+        - asset: assets/more.ttf
+
+  module:
+    androidX: true
+    androidPackage: com.luopingtech.oudesk
+    iosBundleIdentifier: com.luopingtech.oudesk

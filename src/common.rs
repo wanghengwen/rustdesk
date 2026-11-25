@@ -693,6 +693,10 @@ impl Drop for CheckTestNatType {
 }
 
 pub fn test_nat_type() {
+    // npf: no RustDesk server to test against (hbb_common's RENDEZVOUS_SERVERS)
+    if Config::get_rendezvous_servers().is_empty() {
+        return;
+    }
     test_ipv6_sync();
     use std::sync::atomic::{AtomicBool, Ordering};
     std::thread::spawn(move || {
@@ -1163,6 +1167,10 @@ fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {
 // Because the url is always `https://api.rustdesk.com/version/latest`.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
+    // npf: ouDesk comes with npf's packages; RustDesk's update server is never asked
+    if true {
+        return Ok(());
+    }
     let (request, url) =
         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
     let proxy_conf = Config::get_socks();
@@ -1294,7 +1302,8 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    // npf: no API server unless one is configured (upstream: admin.rustdesk.com)
+    "".to_owned()
 }
 
 #[inline]

@@ -3,6 +3,7 @@
 package ffi
 
 import android.content.Context
+import android.view.Surface
 import java.nio.ByteBuffer
 
 import com.carriez.flutter_hbb.RdClipboardManager
@@ -24,6 +25,8 @@ object FFI {
     external fun closeAllSessions()
     external fun setFrameRawEnable(name: String, value: Boolean)
     external fun setCodecInfo(info: String)
+    // the client's video surface of the session key, null when it goes (MainActivity)
+    external fun setFrameSurface(key: String, surface: Surface?)
     external fun getLocalOption(key: String): String
     external fun getBuildinOption(key: String): String
     external fun onClipboardUpdate(clips: ByteBuffer)

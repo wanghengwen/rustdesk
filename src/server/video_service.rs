@@ -143,6 +143,28 @@ struct Screenshot {
     restore_vram: bool,
 }
 
+lazy_static::lazy_static! {
+    // displays whose next frame a receiver needs as a key frame (npf: a frame was lost)
+    static ref KEYFRAME_REQUESTS: Mutex<HashSet<usize>> = Default::default();
+}
+
+/// The next frame of the display is a key frame: a receiver lost one and
+/// skips the frames that depend on it.
+pub fn request_keyframe(display_idx: usize) {
+    KEYFRAME_REQUESTS.lock().unwrap().insert(display_idx);
+}
+
+fn take_keyframe_request(display_idx: usize) -> bool {
+    KEYFRAME_REQUESTS.lock().unwrap().remove(&display_idx)
+}
+
+// a key frame asked of an encoder that does not make one in this time (one
+// that ignores the request) comes from a restart instead; a still screen
+// feeds it the last picture meanwhile. At a low frame rate the wait is a few
+// frames: one goes in per frame time.
+const KEYFRAME_WAIT: Duration = Duration::from_millis(500);
+const KEYFRAME_WAIT_FRAMES: u32 = 6;
+
 #[inline]
 pub fn notify_video_frame_fetched(display_idx: usize, conn_id: i32, frame_tm: Option<Instant>) {
     if let Some(notifier) = FRAME_FETCHED_NOTIFIERS.lock().unwrap().get(&display_idx) {
@@ -744,6 +766,9 @@ fn run(vs: VideoService) -> ResultType<()> {
         capture_height,
     );
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    // the first frame is a key frame anyway
+    take_keyframe_request(display_idx);
+    let mut keyframe_wait: Option<Instant> = None;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -767,6 +792,18 @@ fn run(vs: VideoService) -> ResultType<()> {
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
             }
             log::info!("switch to refresh");
+            bail!("SWITCH");
+        }
+        if take_keyframe_request(display_idx) {
+            if encoder.request_keyframe() {
+                keyframe_wait.get_or_insert_with(Instant::now);
+            } else {
+                log::info!("switch for a key frame");
+                bail!("SWITCH");
+            }
+        }
+        if keyframe_wait.map_or(false, |t| t.elapsed() > KEYFRAME_WAIT.max(spf * KEYFRAME_WAIT_FRAMES)) {
+            log::info!("switch for a key frame (none made in time)");
             bail!("SWITCH");
         }
         if codec_format != Encoder::negotiated_codec() {
@@ -882,6 +919,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_height,
                     )?;
                     static_refresh.on_frame_encoded(&result);
+                    if result.key {
+                        keyframe_wait = None;
+                    }
                     frame_controller.set_send(now, result.send_conn_ids);
                     send_counter += 1;
                 }
@@ -930,7 +970,31 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
                 }
-                if !encoder.latency_free() && yuv.len() > 0 {
+                if keyframe_wait.is_some() && yuv.len() > 0 {
+                    // A key frame was asked for on a still screen: no new picture comes to make
+                    // it from, so the last one goes in again until the key frame is out. A
+                    // restart instead costs a second without picture and a key frame of its own,
+                    // which on a slow path asks for the next one (2026-11-16: 180 restarts in 8
+                    // minutes on a Mac, no picture at all).
+                    let result = handle_one_frame(
+                        display_idx,
+                        &sp,
+                        EncodeInput::YUV(&yuv),
+                        ms,
+                        &mut encoder,
+                        recorder.clone(),
+                        &mut encode_fail_counter,
+                        &mut first_frame,
+                        &mut encoder_warmed_up,
+                        capture_width,
+                        capture_height,
+                    )?;
+                    static_refresh.on_encoded(!result.send_conn_ids.is_empty());
+                    if result.key {
+                        keyframe_wait = None;
+                    }
+                    frame_controller.set_send(now, result.send_conn_ids);
+                } else if !encoder.latency_free() && yuv.len() > 0 {
                     // yun.len() > 0 means the frame is not texture.
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
@@ -953,7 +1017,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         send_counter += 1;
                     }
                 }
-                static_refresh.try_encode(
+                if static_refresh.try_encode(
                     &yuv,
                     spf,
                     quality,
@@ -961,7 +1025,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                     ms,
                     &mut encoder,
                     &mut frame_controller,
-                )?;
+                )? {
+                    keyframe_wait = None;
+                }
             }
             Err(err) => {
                 #[cfg(windows)]
@@ -1298,6 +1364,7 @@ fn handle_one_frame(
 
     let mut send_conn_ids: HashSet<i32> = Default::default();
     let mut vpx_no_output = false;
+    let mut key = false;
     let first = *first_frame;
     *first_frame = false;
     match encoder.encode_to_message(frame, ms) {
@@ -1305,6 +1372,7 @@ fn handle_one_frame(
             *encode_fail_counter = 0;
             *encoder_warmed_up = true;
             vf.display = display as _;
+            key = crate::npf_net::is_key(&vf);
             let mut msg = Message::new();
             msg.set_video_frame(vf);
             recorder
@@ -1349,6 +1417,7 @@ fn handle_one_frame(
     Ok(static_refresh::FrameEncodeResult {
         send_conn_ids,
         vpx_no_output,
+        key,
     })
 }
 

@@ -50,6 +50,7 @@ pub struct VpxEncoder {
     id: VpxVideoCodecId,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
+    force_kf: bool,
 }
 
 pub struct VpxDecoder {
@@ -176,6 +177,7 @@ impl EncoderApi for VpxEncoder {
                     id: config.codec,
                     i444,
                     yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+                    force_kf: false,
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -239,7 +241,15 @@ impl EncoderApi for VpxEncoder {
     }
 
     fn disable(&self) {}
+
+    fn request_keyframe(&mut self) -> bool {
+        self.force_kf = true;
+        true
+    }
 }
+
+/// vpx_encoder.h
+const VPX_EFLAG_FORCE_KF: i64 = 1;
 
 impl VpxEncoder {
     pub fn encode<'a>(&'a mut self, pts: i64, data: &[u8], stride_align: usize) -> Result<EncodeFrames<'a>> {
@@ -268,7 +278,11 @@ impl VpxEncoder {
             &image,
             pts as _,
             1, // Duration
-            0, // Flags
+            if std::mem::take(&mut self.force_kf) {
+                VPX_EFLAG_FORCE_KF as _
+            } else {
+                0
+            },
             VPX_DL_REALTIME as _,
         ));
 

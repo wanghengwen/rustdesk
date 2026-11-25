@@ -75,6 +75,9 @@ impl LogWriter for DocumentWriter {
             logcat().log(record);
             return Ok(());
         }
+        // npf-trace builds: every line to logcat as well, for `adb logcat -s ffi`
+        #[cfg(feature = "npf-trace")]
+        logcat().log(record);
         if !PUBLIC_LOGS_ENABLED.load(Ordering::Relaxed) {
             return self.write_default(now, record);
         }
@@ -120,12 +123,15 @@ impl LogWriter for DocumentWriter {
     }
 }
 
-fn logcat() -> android_logger::AndroidLogger {
-    android_logger::AndroidLogger::new(
-        android_logger::Config::default()
-            .with_max_level(LevelFilter::Debug)
-            .with_tag("ffi"),
-    )
+fn logcat() -> &'static android_logger::AndroidLogger {
+    static LOGCAT: std::sync::OnceLock<android_logger::AndroidLogger> = std::sync::OnceLock::new();
+    LOGCAT.get_or_init(|| {
+        android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(LevelFilter::Debug)
+                .with_tag("ffi"),
+        )
+    })
 }
 
 fn report_error(error: &dyn std::fmt::Display) {

@@ -1389,8 +1389,11 @@ pub fn get_install_options() -> String {
 }
 
 pub fn get_silent_install_options(printer_override: Option<bool>) -> &'static str {
+    // npf: no shortcuts; npf's console and tray open its sessions (its main
+    // window stays hidden), so a shortcut would open nothing
+    let npf = crate::npf_net::enabled();
     if !is_win_10_or_greater() {
-        return "desktopicon startmenu";
+        return if npf { "" } else { "desktopicon startmenu" };
     }
 
     let install_printer = match printer_override {
@@ -1406,10 +1409,11 @@ pub fn get_silent_install_options(printer_override: Option<bool>) -> &'static st
                 })
         }
     };
-    if install_printer {
-        "desktopicon startmenu printer"
-    } else {
-        "desktopicon startmenu"
+    match (install_printer, npf) {
+        (true, true) => "printer",
+        (true, false) => "desktopicon startmenu printer",
+        (false, true) => "",
+        (false, false) => "desktopicon startmenu",
     }
 }
 
@@ -1444,7 +1448,29 @@ fn get_default_install_path() -> String {
             pf = tmp;
         }
     }
+    // npf: inside the product's directory, where npf's installer puts it
+    // (npf's docs/design/naming.md 2.1) and where alone npf takes this
+    // program for its app rustdesk
+    if crate::npf_net::enabled() {
+        return format!("{}\\{}\\{}", pf, NPF_PRODUCT_DIR, crate::get_app_name());
+    }
     format!("{}\\{}", pf, crate::get_app_name())
+}
+
+/// npf: the product's program directory in %ProgramFiles% (ouLink: npf.exe,
+/// npf-tray.exe and this program's subdirectory)
+const NPF_PRODUCT_DIR: &str = "ouLink";
+
+/// npf: this program is installed, upgraded and removed by the product's
+/// installer (npf's client/packaging/windows: the files, the service, the
+/// key InstallState with InstallLocation, which get_valid_subkey() finds
+/// first); RustDesk's own routines, which also make an Uninstall entry,
+/// shortcuts, the file type and the URL scheme, are not for it.
+fn npf_no_installer(what: &str) -> ResultType<()> {
+    if crate::npf_net::enabled() {
+        bail!("{what}: {} is installed and removed by the ouLink installer", crate::get_app_name());
+    }
+    Ok(())
 }
 
 pub fn check_update_broker_process() -> ResultType<()> {
@@ -1626,6 +1652,7 @@ fn get_after_install(
 }
 
 pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> ResultType<()> {
+    npf_no_installer("install")?;
     // MSI and EXE installations use different registry layouts, so MSI-to-EXE upgrades are not supported.
     let (installed_subkey, _, _, _) = get_install_info();
     if get_windows_installer_state(&installed_subkey)? == Some(true) {
@@ -1740,7 +1767,7 @@ if exist \"{tmp_path}\\{app_name} Tray.lnk\" del /f /q \"{tmp_path}\\{app_name} 
         Config::set_option("api-server".into(), lic.api);
     }
 
-    let tray_shortcuts = if config::is_outgoing_only() {
+    let tray_shortcuts = if config::is_outgoing_only() || crate::npf_net::enabled() {
         "".to_owned()
     } else {
         format!("
@@ -1825,6 +1852,7 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
 }
 
 pub fn run_after_install() -> ResultType<()> {
+    npf_no_installer("after-install")?;
     let (_, _, _, exe) = get_install_info();
     run_cmds(
         native_after_install_commands(get_after_install(&exe, None, None, None), &exe, false)?,
@@ -1834,6 +1862,7 @@ pub fn run_after_install() -> ResultType<()> {
 }
 
 pub fn run_before_uninstall() -> ResultType<()> {
+    npf_no_installer("before-uninstall")?;
     run_cmds(get_before_uninstall(true)?, true, "before_install")
 }
 
@@ -1912,6 +1941,7 @@ fn get_uninstall(kill_self: bool, uninstall_printer: bool) -> ResultType<String>
 }
 
 pub fn uninstall_me(kill_self: bool) -> ResultType<()> {
+    npf_no_installer("uninstall")?;
     if is_self_service_running() {
         // This CLI entry is synchronous. Portable builds reuse the retained user configuration.
         tokio::runtime::Builder::new_current_thread()
@@ -3412,12 +3442,17 @@ fn get_install_service_commands(path: &str, exe: &str) -> ResultType<InstallComm
 chcp 65001
 taskkill /F /IM {app_name}.exe{filter}
 {tray_shortcut_commands}
-copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
+{tray_startup}
 {import_config}
 {create_service}
     ",
         import_config = get_import_config(exe),
         create_service = service_control_command("create-service-with-rollback", exe, false)?,
+        tray_startup = if crate::npf_net::enabled() {
+            String::new()
+        } else {
+            format!("copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"")
+        },
     );
     Ok(InstallCommands {
         script,
@@ -3488,6 +3523,7 @@ fn get_directory_size_kb(path: &str) -> u64 {
 }
 
 pub fn update_me(debug: bool) -> ResultType<()> {
+    npf_no_installer("update")?;
     let app_name = crate::get_app_name();
     let src_exe = std::env::current_exe()?.to_string_lossy().to_string();
     let (subkey, path, _, exe) = get_install_info();
@@ -3970,6 +4006,7 @@ pub fn handle_custom_client_staging_dir_before_update(
 //    `1` and `3` must be done in custom actions.
 //    We need also to handle the command line parsing to find the tray processes.
 pub fn update_me_msi(msi: &str, expected_sha256: &str, quiet: bool) -> ResultType<()> {
+    npf_no_installer("update")?;
     verified_update::install_verified_msi(msi, expected_sha256, quiet)
 }
 
@@ -4099,7 +4136,7 @@ fn run_after_run_cmds(silent: bool) {
             .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
             .spawn());
     }
-    if Config::get_option("stop-service") != "Y" {
+    if Config::get_option("stop-service") != "Y" && !crate::npf_net::enabled() {
         allow_err!(std::process::Command::new(&exe).arg("--tray").spawn());
     }
     std::thread::sleep(std::time::Duration::from_millis(300));
