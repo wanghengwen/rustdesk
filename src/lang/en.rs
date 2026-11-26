@@ -318,5 +318,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("oudesk-mac-ask-both-title", "ouDesk needs Screen & System Audio Recording and Accessibility"),
         ("oudesk-mac-ask-both", "{who} wants to see and control this Mac.\n\nouDesk needs two permissions: Screen & System Audio Recording to send the screen, and Accessibility to work the mouse and keyboard for them. The Screen & System Audio Recording page in System Settings is open now: turn ouDesk on there. Then go back to Privacy & Security and turn ouDesk on under Accessibility too.\n\nOnce both are on, ouDesk restarts by itself; connect again to see and control this Mac."),
         ("oudesk-mac-ask-both-system", "{who} wants to see and control this Mac.\n\nouDesk needs two permissions: Screen & System Audio Recording to send the screen, and Accessibility to work the mouse and keyboard for them. The system shows two alerts: in each, click Open System Settings and turn ouDesk on there.\n\nOnce both are on, ouDesk restarts by itself; connect again to see and control this Mac."),
+        ("oudesk-voice-peer-no-mic", "The remote computer has no microphone: you will not hear anyone speaking there."),
+        ("oudesk-voice-own-no-mic", "This computer has no microphone: the other side will not hear you."),
     ].iter().cloned().collect();
 }

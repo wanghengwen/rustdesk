@@ -18,6 +18,11 @@ Main changes from RustDesk:
   rendezvous/relay servers are never contacted.
 - Video over npf: key frames on request without an encoder restart, paced key
   frames on slow paths, 1 frame a second while the window is out of sight.
+- Video latency: on macOS the display stream's frame is waited for and
+  VideoToolbox gives a frame's packet with the frame (FFmpeg port patch
+  res/vcpkg/ffmpeg/patch/0016); the controlling side shows the newest frame
+  first when frames wait; both sides log where a frame's time goes
+  (src/latency.rs).
 - Desktop UI (flutter/lib/npf, flutter/lib/desktop): home, sharing, approval
   card, quality indicator and a session toolbar for npf sessions; main window
   hidden, no tray.

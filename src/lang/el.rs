@@ -858,5 +858,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("oudesk-mac-ask-both-title", ""),
         ("oudesk-mac-ask-both", ""),
         ("oudesk-mac-ask-both-system", ""),
+        ("oudesk-voice-peer-no-mic", ""),
+        ("oudesk-voice-own-no-mic", ""),
     ].iter().cloned().collect();
 }

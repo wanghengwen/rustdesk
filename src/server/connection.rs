@@ -4936,16 +4936,25 @@ impl Connection {
     pub async fn handle_voice_call(&mut self, accepted: bool) {
         if let Some(ts) = self.voice_call_request_timestamp.take() {
             let msg = new_voice_call_response(ts.get(), accepted);
+            let mut microphone = true;
             if accepted {
-                crate::audio_service::set_voice_call_input_device(
-                    crate::get_default_sound_input(),
-                    false,
-                );
+                microphone = crate::audio_service::voice_call_start(true);
                 self.send_to_cm(Data::StartVoiceCall);
             } else {
                 self.send_to_cm(Data::CloseVoiceCall("".to_owned()));
             }
             self.send(msg).await;
+            if !microphone {
+                let mut msg_out = Message::new();
+                msg_out.set_message_box(MessageBox {
+                    msgtype: "nook-nocancel-hasclose".to_owned(),
+                    title: "Voice call".to_owned(),
+                    text: "oudesk-voice-peer-no-mic".to_owned(),
+                    link: "".to_owned(),
+                    ..Default::default()
+                });
+                self.send(msg_out).await;
+            }
             self.voice_calling = accepted;
             if self.is_authed_view_camera_conn() {
                 if let Some(s) = self.server.upgrade() {
@@ -4962,7 +4971,7 @@ impl Connection {
     }
 
     pub async fn close_voice_call(&mut self) {
-        crate::audio_service::set_voice_call_input_device(None, true);
+        crate::audio_service::voice_call_end();
         // Notify the connection manager that the voice call has been closed.
         self.send_to_cm(Data::CloseVoiceCall("".to_owned()));
         self.voice_calling = false;
@@ -5368,7 +5377,7 @@ impl Connection {
         //
         // We can add a (Vec<conn_id>, input device) to avoid this.
         // But it's not necessary now and we have to consider two audio services(client, server).
-        crate::audio_service::set_voice_call_input_device(None, true);
+        crate::audio_service::voice_call_end();
         log::info!("#{} Connection closed: {}", self.inner.id(), reason);
         if lock
             && self.lock_after_session_end

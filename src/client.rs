@@ -114,6 +114,8 @@ pub const SEC30: Duration = Duration::from_secs(30);
 // Empirical restart reconnect grace window.
 const RESTART_REMOTE_DEVICE_GRACE: Duration = Duration::from_secs(5 * 60);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
+/// the frames waiting for a display's decoder, each with when it came
+pub type VideoQueue = ArrayQueue<(VideoFrame, std::time::Instant)>;
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
 
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
@@ -2747,13 +2749,15 @@ impl VideoHandler {
         }
     }
 
-    /// Handle a new video frame.
+    /// Handle a new video frame. `show`: its picture is wanted (not of a
+    /// frame that newer ones wait behind: decoded only).
     #[inline]
     pub fn handle_frame(
         &mut self,
         vf: VideoFrame,
         pixelbuffer: &mut bool,
         chroma: &mut Option<Chroma>,
+        show: bool,
     ) -> ResultType<bool> {
         let format = CodecFormat::from(&vf);
         if format != self.decoder.format() {
@@ -2767,6 +2771,7 @@ impl VideoHandler {
                     &mut self.texture,
                     pixelbuffer,
                     chroma,
+                    show,
                 );
                 if res.as_ref().is_ok_and(|x| *x) {
                     self.fail_counter = 0;
@@ -4063,7 +4068,7 @@ pub fn start_video_thread<F, T>(
     session: Session<T>,
     display: usize,
     video_receiver: mpsc::Receiver<MediaData>,
-    video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
+    video_queue: Arc<RwLock<VideoQueue>>,
     fps: Arc<RwLock<Option<usize>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
@@ -4087,21 +4092,26 @@ pub fn start_video_thread<F, T>(
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
+        let mut stages = crate::latency::Stages::new(
+            format!("display {display} in"),
+            ["queue", "decode", "show"],
+        );
         loop {
             if let Ok(data) = video_receiver.recv() {
                 match data {
                     MediaData::VideoFrame(_) | MediaData::VideoQueue => {
-                        let vf = match data {
+                        // when it came: not known of a key frame (not through the queue)
+                        let (vf, came) = match data {
                             MediaData::VideoFrame(vf) => {
                                 *discard_queue.write().unwrap() = false;
-                                *vf
+                                (*vf, None)
                             }
                             MediaData::VideoQueue => {
-                                if let Some(vf) = video_queue.read().unwrap().pop() {
+                                if let Some((vf, came)) = video_queue.read().unwrap().pop() {
                                     if discard_queue.read().unwrap().clone() {
                                         continue;
                                     }
-                                    vf
+                                    (vf, Some(came))
                                 } else {
                                     continue;
                                 }
@@ -4128,14 +4138,25 @@ pub fn start_video_thread<F, T>(
                             let mut pixelbuffer = true;
                             let mut tmp_chroma = None;
                             let format_changed = handler.decoder.format() != format;
-                            match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
+                            // Newer frames wait behind this one (they came in a burst, or
+                            // this thread was held up): it is decoded and not shown, so
+                            // that the newest is on the screen sooner. A frame shown takes
+                            // most of a frame time, and each one waiting adds that to
+                            // what the user sees late.
+                            let show = video_queue.read().unwrap().is_empty();
+                            match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma, show) {
+                                Ok(true) if !show => stages.skipped(),
                                 Ok(true) => {
+                                    let decoded = std::time::Instant::now();
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+                                    if let Some(came) = came {
+                                        stages.frame([start - came, decoded - start, decoded.elapsed()]);
+                                    }
 
                                     // chroma
                                     if tmp_chroma.is_some() && last_chroma != tmp_chroma {

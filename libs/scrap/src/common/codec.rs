@@ -634,6 +634,9 @@ impl Decoder {
     }
 
     // rgb [in/out] fmt and stride must be set in ImageRgb
+    /// `show`: the picture is wanted. A frame that is not shown (newer ones
+    /// wait behind it) is decoded for the decoder's state only: its picture
+    /// is not converted.
     pub fn handle_video_frame(
         &mut self,
         frame: &video_frame::Union,
@@ -641,25 +644,26 @@ impl Decoder {
         _texture: &mut ImageTexture,
         _pixelbuffer: &mut bool,
         chroma: &mut Option<Chroma>,
+        show: bool,
     ) -> ResultType<bool> {
         match frame {
             video_frame::Union::Vp8s(vp8s) => {
                 if let Some(vp8) = &mut self.vp8 {
-                    Decoder::handle_vpxs_video_frame(vp8, vp8s, rgb, chroma)
+                    Decoder::handle_vpxs_video_frame(vp8, vp8s, rgb, chroma, show)
                 } else {
                     bail!("vp8 decoder not available");
                 }
             }
             video_frame::Union::Vp9s(vp9s) => {
                 if let Some(vp9) = &mut self.vp9 {
-                    Decoder::handle_vpxs_video_frame(vp9, vp9s, rgb, chroma)
+                    Decoder::handle_vpxs_video_frame(vp9, vp9s, rgb, chroma, show)
                 } else {
                     bail!("vp9 decoder not available");
                 }
             }
             video_frame::Union::Av1s(av1s) => {
                 if let Some(av1) = &mut self.av1 {
-                    Decoder::handle_av1s_video_frame(av1, av1s, rgb, chroma)
+                    Decoder::handle_av1s_video_frame(av1, av1s, rgb, chroma, show)
                 } else {
                     bail!("av1 decoder not available");
                 }
@@ -681,6 +685,7 @@ impl Decoder {
                         _texture,
                         _pixelbuffer,
                         &mut self.i420,
+                        show,
                     );
                 }
                 Err(anyhow!("don't support h264!"))
@@ -702,6 +707,7 @@ impl Decoder {
                         _texture,
                         _pixelbuffer,
                         &mut self.i420,
+                        show,
                     );
                 }
                 Err(anyhow!("don't support h265!"))
@@ -734,6 +740,7 @@ impl Decoder {
         vpxs: &EncodedVideoFrames,
         rgb: &mut ImageRgb,
         chroma: &mut Option<Chroma>,
+        show: bool,
     ) -> ResultType<bool> {
         let mut last_frame = vpxcodec::Image::new();
         for vpx in vpxs.frames.iter() {
@@ -750,7 +757,9 @@ impl Decoder {
             Ok(false)
         } else {
             *chroma = Some(last_frame.chroma());
-            last_frame.to(rgb);
+            if show {
+                last_frame.to(rgb);
+            }
             Ok(true)
         }
     }
@@ -761,6 +770,7 @@ impl Decoder {
         av1s: &EncodedVideoFrames,
         rgb: &mut ImageRgb,
         chroma: &mut Option<Chroma>,
+        show: bool,
     ) -> ResultType<bool> {
         let mut last_frame = aom::Image::new();
         for av1 in av1s.frames.iter() {
@@ -777,7 +787,9 @@ impl Decoder {
             Ok(false)
         } else {
             *chroma = Some(last_frame.chroma());
-            last_frame.to(rgb);
+            if show {
+                last_frame.to(rgb);
+            }
             Ok(true)
         }
     }
@@ -791,6 +803,7 @@ impl Decoder {
         _texture: &mut ImageTexture,
         _pixelbuffer: &mut bool,
         i420: &mut Vec<u8>,
+        show: bool,
     ) -> ResultType<bool> {
         let mut ret = false;
         for h264 in frames.frames.iter() {
@@ -808,7 +821,7 @@ impl Decoder {
                     continue;
                 }
                 // TODO: just process the last frame
-                if image.to_fmt(rgb, i420).is_ok() {
+                if !show || image.to_fmt(rgb, i420).is_ok() {
                     ret = true;
                 }
             }

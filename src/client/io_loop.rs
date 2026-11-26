@@ -7,7 +7,6 @@ use crate::{
         self, new_voice_call_request, Client, Data, Interface, MediaData, MediaSender,
         QualityStatus, MILLI1, SEC30,
     },
-    common::get_default_sound_input,
     ui_session_interface::{InvokeUiSession, Session},
 };
 
@@ -600,7 +599,14 @@ impl<T: InvokeUiSession> Remote<T> {
             // It's better to distinguish the server side and client side.
             // But it' not necessary for now, because it's not a common case.
             // And it is immediately known when the input device is changed.
-            crate::audio_service::set_voice_call_input_device(get_default_sound_input(), false);
+            if !crate::audio_service::voice_call_start(false) {
+                self.handler.msgbox(
+                    "nook-nocancel-hasclose",
+                    "Voice call",
+                    "oudesk-voice-own-no-mic",
+                    "",
+                );
+            }
             #[cfg(target_os = "android")]
             super::voice_playback::call_started();
             // Create a channel to receive error or closed message
@@ -629,7 +635,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 client_conn_inner,
                                 false,
                             );
-                            crate::audio_service::set_voice_call_input_device(None, true);
+                            crate::audio_service::voice_call_end();
                             #[cfg(target_os = "android")]
                             super::voice_playback::call_ended();
                             break;
@@ -1737,7 +1743,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             .ok();
                     } else {
                         let video_queue = thread.video_queue.read().unwrap();
-                        if video_queue.force_push(vf).is_some() {
+                        if video_queue.force_push((vf, std::time::Instant::now())).is_some() {
                             drop(video_queue);
                             self.handler.refresh_video(display as _);
                         } else {
@@ -3162,7 +3168,7 @@ struct FpsControl {
 }
 
 struct VideoThread {
-    video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
+    video_queue: Arc<RwLock<client::VideoQueue>>,
     video_sender: MediaSender,
     decode_fps: Arc<RwLock<Option<usize>>>,
     frame_count: Arc<RwLock<usize>>,

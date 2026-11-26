@@ -858,5 +858,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("oudesk-mac-ask-both-title", "需要開啟「螢幕與系統錄音」和「輔助使用」"),
         ("oudesk-mac-ask-both", "{who}正在請求遠端查看和操作這台 Mac。\n\nouDesk 要有兩項權限：「螢幕與系統錄音」才能把螢幕畫面傳給對方，「輔助使用」才能讓對方操作滑鼠和鍵盤。系統設定裡「螢幕與系統錄音」的頁面已經打開，請在列表裡打開 ouDesk 的開關；再回到「隱私權與安全性」，在「輔助使用」裡同樣打開 ouDesk。\n\n都打開後 ouDesk 會自動重新啟動，對方重新連線就能看到畫面並操作。"),
         ("oudesk-mac-ask-both-system", "{who}正在請求遠端查看和操作這台 Mac。\n\nouDesk 要有兩項權限：「螢幕與系統錄音」才能把螢幕畫面傳給對方，「輔助使用」才能讓對方操作滑鼠和鍵盤。系統會跳出兩個提示，請在每個提示裡點「打開系統設定」，在列表裡打開 ouDesk 的開關。\n\n都打開後 ouDesk 會自動重新啟動，對方重新連線就能看到畫面並操作。"),
+        ("oudesk-voice-peer-no-mic", "對方電腦沒有麥克風，你聽不到對方說話。"),
+        ("oudesk-voice-own-no-mic", "這台電腦沒有麥克風，對方聽不到你說話。"),
     ].iter().cloned().collect();
 }

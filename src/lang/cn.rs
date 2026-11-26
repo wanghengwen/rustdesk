@@ -858,5 +858,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("oudesk-mac-ask-both-title", "需要打开“录屏与系统录音”和“辅助功能”"),
         ("oudesk-mac-ask-both", "{who}正在请求远程查看和操作这台 Mac。\n\nouDesk 要有两项权限：“录屏与系统录音”才能把屏幕画面传给对方，“辅助功能”才能让对方操作鼠标和键盘。系统设置里“录屏与系统录音”的页面已经打开，请在列表里打开 ouDesk 的开关；再回到“隐私与安全性”，在“辅助功能”里同样打开 ouDesk。\n\n都打开后 ouDesk 会自动重新启动，对方重新连接就能看到画面并操作。"),
         ("oudesk-mac-ask-both-system", "{who}正在请求远程查看和操作这台 Mac。\n\nouDesk 要有两项权限：“录屏与系统录音”才能把屏幕画面传给对方，“辅助功能”才能让对方操作鼠标和键盘。系统会弹出两个提示，请在每个提示里点“打开系统设置”，在列表里打开 ouDesk 的开关。\n\n都打开后 ouDesk 会自动重新启动，对方重新连接就能看到画面并操作。"),
+        ("oudesk-voice-peer-no-mic", "对方电脑没有麦克风，你听不到对方说话。"),
+        ("oudesk-voice-own-no-mic", "这台电脑没有麦克风，对方听不到你说话。"),
     ].iter().cloned().collect();
 }

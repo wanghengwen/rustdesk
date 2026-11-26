@@ -210,10 +210,10 @@ impl EncoderApi for HwRamEncoder {
         true
     }
 
+    // VideoToolbox's packet is waited for (hwcodec's do_encode): a frame in
+    // gives its packet, as the others do. MediaCodec's comes with a later frame.
     fn latency_free(&self) -> bool {
-        ["mediacodec", "videotoolbox"]
-            .iter()
-            .all(|&x| !self.config.name.contains(x))
+        !self.config.name.contains("mediacodec")
     }
 
     fn is_hardware(&self) -> bool {

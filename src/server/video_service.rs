@@ -769,6 +769,10 @@ fn run(vs: VideoService) -> ResultType<()> {
     // the first frame is a key frame anyway
     take_keyframe_request(display_idx);
     let mut keyframe_wait: Option<Instant> = None;
+    let mut stages = crate::latency::Stages::new(
+        format!("display {display_idx} out ({codec_format:?})"),
+        ["convert", "encode"],
+    );
 
     while sp.ok() {
         #[cfg(windows)]
@@ -903,7 +907,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
 
+                    let captured = Instant::now();
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
+                    let converted = Instant::now();
                     static_refresh.on_frame(&frame);
                     let result = handle_one_frame(
                         display_idx,
@@ -918,6 +924,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    stages.frame([converted - captured, converted.elapsed()]);
                     static_refresh.on_frame_encoded(&result);
                     if result.key {
                         keyframe_wait = None;

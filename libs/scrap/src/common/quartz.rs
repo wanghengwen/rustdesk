@@ -1,17 +1,19 @@
 use crate::{quartz, Frame, Pixfmt};
+use std::io;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, TryLockError};
-use std::{io, mem};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub struct Capturer {
     inner: quartz::Capturer,
-    frame: Arc<Mutex<Option<quartz::Frame>>>,
+    /// the newest frame not taken yet; the display stream's thread tells
+    /// when it puts one
+    frame: Arc<(Mutex<Option<quartz::Frame>>, Condvar)>,
     saved_raw_data: Vec<u8>, // for faster compare and copy
 }
 
 impl Capturer {
     pub fn new(display: Display) -> io::Result<Capturer> {
-        let frame = Arc::new(Mutex::new(None));
+        let frame = Arc::new((Mutex::new(None), Condvar::new()));
 
         let f = frame.clone();
         let inner = quartz::Capturer::new(
@@ -21,8 +23,9 @@ impl Capturer {
             quartz::PixelFormat::Argb8888,
             Default::default(),
             move |inner| {
-                if let Ok(mut f) = f.lock() {
-                    *f = Some(inner);
+                if let Ok(mut slot) = f.0.lock() {
+                    *slot = Some(inner);
+                    f.1.notify_one();
                 }
             },
         )
@@ -45,32 +48,32 @@ impl Capturer {
 }
 
 impl crate::TraitCapturer for Capturer {
-    fn frame<'a>(&'a mut self, _timeout_ms: std::time::Duration) -> io::Result<Frame<'a>> {
-        match self.frame.try_lock() {
-            Ok(mut handle) => {
-                let mut frame = None;
-                mem::swap(&mut frame, &mut handle);
-
-                match frame {
-                    Some(mut frame) => {
-                        crate::would_block_if_equal(&mut self.saved_raw_data, frame.inner())?;
-                        frame.surface_to_bgra(self.height());
-                        Ok(Frame::PixelBuffer(PixelBuffer {
-                            frame,
-                            data: PhantomData,
-                            width: self.width(),
-                            height: self.height(),
-                        }))
-                    }
-
-                    None => Err(io::ErrorKind::WouldBlock.into()),
-                }
-            }
-
-            Err(TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
-
-            Err(TryLockError::Poisoned(..)) => Err(io::ErrorKind::Other.into()),
-        }
+    /// The next frame, waited for up to `timeout` (as the other platforms'
+    /// capturers wait): taken when the display stream gives it. Looked for
+    /// only once a frame time, it had waited up to a frame time of the
+    /// display (8 ms on average at 60 Hz) before it was encoded. It still
+    /// has when frames are taken slower than the display gives them: the
+    /// newest then waits for the caller.
+    fn frame<'a>(&'a mut self, timeout: std::time::Duration) -> io::Result<Frame<'a>> {
+        let (slot, came) = &*self.frame;
+        let frame = {
+            let guard = slot.lock().map_err(|_| io::ErrorKind::Other)?;
+            let (mut guard, _) = came
+                .wait_timeout_while(guard, timeout, |f| f.is_none())
+                .map_err(|_| io::ErrorKind::Other)?;
+            guard.take()
+        };
+        let Some(mut frame) = frame else {
+            return Err(io::ErrorKind::WouldBlock.into());
+        };
+        crate::would_block_if_equal(&mut self.saved_raw_data, frame.inner())?;
+        frame.surface_to_bgra(self.height());
+        Ok(Frame::PixelBuffer(PixelBuffer {
+            frame,
+            data: PhantomData,
+            width: self.width(),
+            height: self.height(),
+        }))
     }
 }
 

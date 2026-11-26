@@ -25,6 +25,8 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 lazy_static::lazy_static! {
     static ref VOICE_CALL_INPUT_DEVICE: Arc::<Mutex::<Option<String>>> = Default::default();
 }
+/// A voice call on a machine without a microphone: the service sends nothing.
+static VOICE_CALL_SILENT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn new() -> GenericService {
@@ -54,8 +56,63 @@ pub fn set_voice_call_input_device(device: Option<String>, set_if_present: bool)
     if *VOICE_CALL_INPUT_DEVICE.lock().unwrap() == device {
         return;
     }
+    if device.is_some() {
+        VOICE_CALL_SILENT.store(false, Ordering::SeqCst);
+    }
     *VOICE_CALL_INPUT_DEVICE.lock().unwrap() = device;
     restart();
+}
+
+/// Whether this machine has a microphone for a voice call: the system's
+/// default input device. Linux and Android are taken to have one: PulseAudio
+/// names an output's monitor as the default source when there is none, and
+/// Android's recording is not this service's.
+fn has_microphone() -> bool {
+    #[cfg(any(windows, target_os = "macos"))]
+    return crate::get_default_sound_input().is_some();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    true
+}
+
+/// A voice call starts on this machine: for its time the service records the
+/// microphone instead of the system's sound. Without a microphone the
+/// system's sound would go on, and in it the peer's voice as this machine
+/// plays it: the peer would hear itself. So the service then sends nothing
+/// till the call ends. `system_sound`: the service is the controlled side's,
+/// whose system's sound may go on where the recording leaves this process's
+/// own sound out (ScreenCaptureKit, `exclude_own_sound`); the calling side
+/// has only its voice to send.
+///
+/// Returns whether there is a microphone.
+pub fn voice_call_start(system_sound: bool) -> bool {
+    let mic = get_voice_call_input_device().is_some() || has_microphone();
+    if mic {
+        set_voice_call_input_device(crate::get_default_sound_input(), false);
+    } else if !(system_sound && records_without_own_sound()) {
+        log::info!("voice call: no microphone here, nothing is sent during it");
+        VOICE_CALL_SILENT.store(true, Ordering::SeqCst);
+    } else {
+        log::info!("voice call: no microphone here, the system's sound goes on");
+    }
+    mic
+}
+
+/// The voice call is over: the service is back at what it records otherwise.
+pub fn voice_call_end() {
+    if VOICE_CALL_SILENT.swap(false, Ordering::SeqCst) {
+        restart();
+    }
+    set_voice_call_input_device(None, true);
+}
+
+/// Whether the system's sound is recorded without this process's own.
+fn records_without_own_sound() -> bool {
+    #[cfg(feature = "screencapturekit")]
+    return is_screen_capture_kit_available()
+        && Config::get_option("audio-input").is_empty()
+        && cpal_impl::exclude_own_sound();
+    #[cfg(not(feature = "screencapturekit"))]
+    false
 }
 
 #[inline]
@@ -274,6 +331,12 @@ mod cpal_impl {
     }
 
     pub fn run(sp: EmptyExtraFieldService, state: &mut State) -> ResultType<()> {
+        if VOICE_CALL_SILENT.load(Ordering::SeqCst) {
+            // the recording closed; `voice_call_end` restarts the service,
+            // which opens it again and sends the format
+            state.reset();
+            return Ok(());
+        }
         if let Some(stream) = &state.stream {
             if stream.errors.needs_restart() {
                 // Recreate on the service thread, outside the capture callbacks.
@@ -469,8 +532,57 @@ mod cpal_impl {
         Ok((device, format))
     }
 
+    /// cpal asks ScreenCaptureKit for every process's sound, this one's too
+    /// (`setExcludesCurrentProcessAudio: NO`, fixed in its code). This process's
+    /// own sound is the peer's voice in a voice call, which must not go back
+    /// to the peer: the setter is replaced by one that always says YES.
+    #[cfg(feature = "screencapturekit")]
+    pub(super) fn exclude_own_sound() -> bool {
+        use objc::runtime::{
+            class_getInstanceMethod, method_getImplementation, method_setImplementation, Class,
+            Imp, Method, Object, Sel, BOOL, YES,
+        };
+        use objc::{sel, sel_impl};
+        use std::sync::atomic::AtomicUsize;
+        static SETTER: AtomicUsize = AtomicUsize::new(0);
+        static DONE: std::sync::Once = std::sync::Once::new();
+        extern "C" fn exclude(this: *mut Object, sel: Sel, _exclude: BOOL) {
+            // SAFETY: SETTER holds the class's own setter, of this signature,
+            // stored before this function took its place.
+            let setter: extern "C" fn(*mut Object, Sel, BOOL) =
+                unsafe { std::mem::transmute(SETTER.load(Ordering::SeqCst)) };
+            setter(this, sel, YES);
+        }
+        DONE.call_once(|| {
+            let Some(class) = Class::get("SCStreamConfiguration") else {
+                return;
+            };
+            // SAFETY: the runtime's own calls on a class it gave; the new
+            // implementation has the setter's signature.
+            unsafe {
+                let method = class_getInstanceMethod(class, sel!(setExcludesCurrentProcessAudio:))
+                    as *mut Method;
+                if method.is_null() {
+                    return;
+                }
+                SETTER.store(method_getImplementation(method) as usize, Ordering::SeqCst);
+                method_setImplementation(
+                    method,
+                    std::mem::transmute::<extern "C" fn(*mut Object, Sel, BOOL), Imp>(exclude),
+                );
+            }
+        });
+        let done = SETTER.load(Ordering::SeqCst) != 0;
+        if !done {
+            log::warn!("ScreenCaptureKit: this process's own sound is not left out");
+        }
+        done
+    }
+
     fn play(sp: &GenericService) -> ResultType<ActiveCaptureStream> {
         use cpal::SampleFormat::*;
+        #[cfg(feature = "screencapturekit")]
+        exclude_own_sound();
         let (device, config) = get_device()?;
         let sp = sp.clone();
         // Sample rate must be one of 8000, 12000, 16000, 24000, or 48000.
@@ -719,5 +831,27 @@ fn send_f32(data: &[f32], encoder: &mut AudioEncoder, sp: &GenericService) {
             sp.send(msg_out);
         }
         Err(error) => log::warn!("Failed to encode audio frame: {error:?}"),
+    }
+}
+
+#[cfg(all(test, feature = "screencapturekit"))]
+mod tests {
+    /// ScreenCaptureKit's configuration says "leave this process's sound out"
+    /// whatever its setter is told (`exclude_own_sound`).
+    #[test]
+    fn own_sound_is_left_out() {
+        use objc::runtime::{Object, BOOL, NO, YES};
+        use objc::{class, msg_send, sel, sel_impl};
+        // SAFETY: an object of the system's class, made, asked and released here.
+        unsafe {
+            let cfg: *mut Object = msg_send![class!(SCStreamConfiguration), new];
+            let was: BOOL = msg_send![cfg, excludesCurrentProcessAudio];
+            assert!(was == NO);
+            assert!(super::cpal_impl::exclude_own_sound());
+            let _: () = msg_send![cfg, setExcludesCurrentProcessAudio: NO];
+            let now: BOOL = msg_send![cfg, excludesCurrentProcessAudio];
+            assert!(now == YES);
+            let _: () = msg_send![cfg, release];
+        }
     }
 }

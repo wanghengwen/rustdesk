@@ -1,0 +1,35 @@
+Subject: videotoolbox: a real-time frame's packet comes with the frame
+
+The encoder's packets were read without waiting right after the frame was
+given, while VideoToolbox encodes on a thread of its own: each packet came
+out when the next frame was sent, a frame time late. In real time and with
+no B frames the frame is completed first.
+
+---
+ libavcodec/videotoolboxenc.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/libavcodec/videotoolboxenc.c b/libavcodec/videotoolboxenc.c
+--- a/libavcodec/videotoolboxenc.c
++++ b/libavcodec/videotoolboxenc.c
+@@ -2723,6 +2723,20 @@
+     if (!get_frame) {
+         status = 0;
+         goto end_nopkt;
++    }
++
++    // Real time, frames in order: the frame's packet is asked for now.
++    // VideoToolbox gives it a few ms later on a thread of its own, and what is
++    // read below without waiting was the packet of the frame before: every
++    // packet came out a frame time late (17 ms at 60 fps, 33 ms at 30).
++    if (frame && vtctx->realtime > 0 && !vtctx->has_b_frames) {
++        status = VTCompressionSessionCompleteFrames(vtctx->session,
++                                                    kCMTimeInvalid);
++        if (status) {
++            av_log(avctx, AV_LOG_ERROR, "Error completing frame: %d\n", status);
++            status = AVERROR_EXTERNAL;
++            goto end_nopkt;
++        }
+     }
+ 
+     status = vtenc_q_pop(vtctx, !frame, &buf, &sei);
