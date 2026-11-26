@@ -437,21 +437,47 @@ impl Capturer {
         self.output_texture = texture;
     }
 
+    /// The next frame with a picture (`picture` tells), waited for up to
+    /// `timeout` ms; the caller has released the frame before. The pointer
+    /// moving ends AcquireNextFrame's wait too, with no picture: that frame
+    /// is released and the wait goes on. Given back at once as "nothing
+    /// yet", it sent the caller to sleep out its frame time, and a picture
+    /// that came meanwhile waited for it: while the pointer moved, pictures
+    /// went out up to a frame time late (17 ms at 60 fps, 33 ms at 30).
+    unsafe fn acquire(
+        &mut self,
+        timeout: UINT,
+        picture: impl Fn(&DXGI_OUTDUPL_FRAME_INFO) -> bool,
+    ) -> io::Result<ComPtr<IDXGIResource>> {
+        let start = std::time::Instant::now();
+        loop {
+            let waited = start.elapsed().as_millis().min(timeout as _) as UINT;
+            let mut frame = ptr::null_mut();
+            #[allow(invalid_value)]
+            let mut info = mem::MaybeUninit::uninit().assume_init();
+            wrap_hresult((*self.duplication.0).AcquireNextFrame(
+                timeout - waited,
+                &mut info,
+                &mut frame,
+            ))?;
+            self.frame_state = FrameState::Acquired;
+            let frame = ComPtr(frame);
+            if picture(&info) {
+                return Ok(frame);
+            }
+            if waited >= timeout {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            drop(frame);
+            self.release_frame()?;
+        }
+    }
+
     unsafe fn load_frame(&mut self, timeout: UINT) -> io::Result<(*const u8, i32)> {
         if self.duplication.0.is_null() {
             return Err(io::ErrorKind::AddrNotAvailable.into());
         }
-        let mut frame = ptr::null_mut();
-        #[allow(invalid_value)]
-        let mut info = mem::MaybeUninit::uninit().assume_init();
-
-        wrap_hresult((*self.duplication.0).AcquireNextFrame(timeout, &mut info, &mut frame))?;
-        self.frame_state = FrameState::Acquired;
-        let frame = ComPtr(frame);
-
-        if *info.LastPresentTime.QuadPart() == 0 {
-            return Err(std::io::ErrorKind::WouldBlock.into());
-        }
+        let frame = self.acquire(timeout, |info| *info.LastPresentTime.QuadPart() != 0)?;
 
         #[allow(invalid_value)]
         let mut rect = mem::MaybeUninit::uninit().assume_init();
@@ -593,17 +619,9 @@ impl Capturer {
                 return Err(std::io::ErrorKind::AddrNotAvailable.into());
             }
             self.release_frame()?;
-            let mut frame = ptr::null_mut();
-            #[allow(invalid_value)]
-            let mut info = mem::MaybeUninit::uninit().assume_init();
-
-            wrap_hresult((*self.duplication.0).AcquireNextFrame(timeout, &mut info, &mut frame))?;
-            self.frame_state = FrameState::Acquired;
-            let frame = ComPtr(frame);
-
-            if info.AccumulatedFrames == 0 || *info.LastPresentTime.QuadPart() == 0 {
-                return Err(std::io::ErrorKind::WouldBlock.into());
-            }
+            let frame = self.acquire(timeout, |info| {
+                info.AccumulatedFrames != 0 && *info.LastPresentTime.QuadPart() != 0
+            })?;
 
             let mut texture: *mut ID3D11Texture2D = ptr::null_mut();
             (*frame.0).QueryInterface(

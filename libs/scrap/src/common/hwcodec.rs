@@ -210,8 +210,8 @@ impl EncoderApi for HwRamEncoder {
         true
     }
 
-    // VideoToolbox's packet is waited for (hwcodec's do_encode): a frame in
-    // gives its packet, as the others do. MediaCodec's comes with a later frame.
+    // VideoToolbox gives a frame's packet with the frame (FFmpeg port patch
+    // 0016), as the others do. MediaCodec's comes with a later frame.
     fn latency_free(&self) -> bool {
         !self.config.name.contains("mediacodec")
     }
